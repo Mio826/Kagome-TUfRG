@@ -38,3 +38,28 @@ if hasattr(diverge, "init"):
     print("diverge.init() worked")
     diverge.finalize()
     print("diverge.finalize() worked")
+
+
+%%bash
+set -e
+
+SRCROOT="/content/diverge_source_check"
+rm -rf "$SRCROOT"
+mkdir -p "$SRCROOT"
+cd "$SRCROOT"
+
+echo "Trying git clone..."
+git clone --depth 1 https://git.rwth-aachen.de/frg/diverge.git diverge_src || true
+
+if [ ! -d diverge_src/.git ]; then
+  echo "git clone failed or incomplete."
+  exit 0
+fi
+
+cd diverge_src
+echo "Current commit:"
+git log -1 --oneline
+
+echo
+echo "Top-level tree:"
+find . -maxdepth 2 -type f | sed 's#^\./##' | sort | head -200

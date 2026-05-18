@@ -1,0 +1,40 @@
+ssh mli826@login-phoenix.pace.gatech.edu
+
+module load anaconda3/2023.03
+conda activate /storage/scratch1/4/mli826/conda_envs/diverge-test
+
+
+sbatch --export=ALL,U=1.0,V=0.5,LAMBDA_NN=0.05,LAMBDA_NNN=0.0,TAG=U1_V0p5_lnn005 run_tufrg_real_v2.sbatch
+
+for V in 0.0 0.2 0.4 0.6 0.8 1.0
+do
+  Vtag=${V/./p}
+  sbatch --export=ALL,U=1.0,V=$V,LAMBDA_NN=0.05,LAMBDA_NNN=0.0,TAG=scan_U1_V${Vtag}_l1_0p05 run_tufrg_real_v2.sbatch
+done
+
+sbatch --export=ALL,U=1.0,V=0.5,LAMBDA_NN=0.05,NK=18,NKF=3,TU_DISTANCE=1.01,NITER=100,TAG=U1_V0p5_nk18 run_tufrg_real_v2.sbatch
+
+
+
+
+import sys, subprocess, platform, importlib.util
+
+print("Python:", sys.executable)
+print("Platform:", platform.platform())
+
+subprocess.run(
+    [sys.executable, "-m", "pip", "install", "diverge-flow"],
+    check=True,
+)
+
+import diverge
+
+print("diverge:", diverge)
+print("has init:", hasattr(diverge, "init"))
+print("has finalize:", hasattr(diverge, "finalize"))
+
+if hasattr(diverge, "init"):
+    diverge.init()
+    print("diverge.init() worked")
+    diverge.finalize()
+    print("diverge.finalize() worked")

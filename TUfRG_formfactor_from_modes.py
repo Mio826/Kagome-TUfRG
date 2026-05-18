@@ -135,49 +135,75 @@ def summarize_vector(O: Any, f: np.ndarray) -> Dict[str, float]:
 
 
 def classify(row: Mapping[str, Any]) -> str:
+    """Coarse physical label for a loop-dressed TU form-factor mode.
+
+    The labels are intentionally conservative.  TUFRG modes often have an
+    onsite A1 core plus extended diagonal dressing; such modes should not be
+    dismissed as "mixed" merely because the normalized onsite weight is below
+    0.5.  For q=0 charge, raw Gamma charge can include a forward-scattering-like
+    uniform A1 sector, so Level-1 should be checked for the A1-projected strength.
+    """
     q = str(row.get("q_label", ""))
     sector = str(row.get("sector", ""))
     onsite = float(row.get("onsite_weight", 0.0))
     nn = float(row.get("nn_weight", 0.0))
     imag = float(row.get("imag_bond_proxy_weight", 0.0))
-    a1 = float(row.get("onsite_A1_weight_within_onsite", 0.0))
-    e = float(row.get("onsite_E_weight_within_onsite", 0.0))
+    a1_within = float(row.get("onsite_A1_weight_within_onsite", 0.0))
+    e_within = float(row.get("onsite_E_weight_within_onsite", 0.0))
     onsite_frac = float(row.get("onsite_diag_norm_fraction", 0.0))
-    if sector in {"mag", "ph-sz", "ph-z"} or sector.startswith("ph-s"):
-        if q == "Gamma" and onsite > 0.5 and onsite_frac > 0.5 and a1 > 0.8:
+    a1_total = float(row.get("onsite_A1_weight_total", 0.0))
+    e_total = float(row.get("onsite_E_weight_total", 0.0))
+    diag = float(row.get("diagonal_weight", 0.0))
+
+    is_spin = sector in {"mag", "ph-sz", "ph-z"} or sector.startswith("ph-s")
+    is_charge = sector in {"charge", "ph-rho"} or "rho" in sector
+    is_pair = sector.startswith("pp") or sector == "sc"
+
+    if is_spin:
+        if q == "Gamma" and onsite > 0.5 and onsite_frac > 0.5 and a1_within > 0.8:
             return "q0-FM-onsite-A1-like"
+        if q == "Gamma" and a1_total > 0.05 and a1_within > 0.8 and diag > 0.8:
+            return "q0-FM-A1-core-with-diagonal-dressing"
         if q.startswith("M") and onsite > 0.5:
             return "finiteM-SDW-onsite-like"
         if q.startswith("M") and nn > 0.25 and imag > 0.25:
             return "finiteM-spin-current/SBO-imag-bond-candidate"
         if q.startswith("M") and nn > 0.25:
             return "finiteM-SBO-real-bond-like"
-    if sector in {"charge", "ph-rho"} or "rho" in sector:
-        if q == "Gamma" and onsite > 0.5 and onsite_frac > 0.5 and a1 > 0.95:
+
+    if is_charge:
+        if q == "Gamma" and onsite > 0.5 and onsite_frac > 0.5 and a1_within > 0.95:
             return "q0-uniform-charge-A1-forward-scattering-like"
-        if q == "Gamma" and onsite > 0.5 and onsite_frac > 0.5 and e > 0.8:
-            return "q0-PI-nematic-onsite-E-like"
+        if q == "Gamma" and a1_total > 0.05 and a1_within > 0.95 and diag > 0.8:
+            return "q0-uniform-charge-A1-core-with-diagonal-dressing"
+        if q == "Gamma" and (e_within > 0.8 or e_total > 0.2):
+            return "q0-PI-nematic-E-like"
         if q.startswith("M") and onsite > 0.5:
             return "finiteM-CDW-onsite-like"
         if q.startswith("M") and nn > 0.25 and imag > 0.25:
             return "finiteM-charge-current/cBO-imag-bond-candidate"
         if q.startswith("M") and nn > 0.25:
             return "finiteM-CBO-real-bond-like"
-    if sector.startswith("pp") or sector == "sc":
-        if q == "Gamma" and onsite > 0.5 and a1 > 0.5:
+
+    if is_pair:
+        if q == "Gamma" and onsite > 0.5 and a1_within > 0.5:
             return "q0-A1-onsite-SC-like"
+        if q == "Gamma" and a1_total > 0.15 and a1_within > 0.8 and diag > 0.8:
+            return "q0-A1-extended-SC-like"
         if q == "Gamma" and nn > 0.25:
             return "q0-NN-pairing-form-factor"
         if q.startswith("M"):
             return "finiteQ-pairing/PDW-like"
+
     if nn > 0.25 and imag > 0.25:
         return "imaginary-bond-rich-current-like-formfactor"
     if nn > 0.25:
         return "NN-bond-rich-formfactor"
     if onsite > 0.5:
         return "onsite-dominated-formfactor"
+    if diag > 0.8:
+        return "diagonal-longer-range-dressed-formfactor"
     return "mixed-or-longer-range-formfactor"
-
 
 def top_components(O: Any, f: np.ndarray, top: int, base: Mapping[str, Any]) -> List[Dict[str, Any]]:
     R, ofrom, oto = get_mi_arrays(O)

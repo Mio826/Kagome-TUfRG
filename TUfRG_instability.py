@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-TUfRG_instability_v2.py
-Version: v2-calibrated-explicit-spin-ph-2026-05-13
+TUfRG_instability.py
+Version: clean-rawguard-q0A1-2026-05-18
 
 Level-1 instability inspector for divERGe TUFRG output.
 
-This version fixes the main v1 problem for explicit-spin non-SU2 PH channels.
+This version adds a hard guard against projected explicit-spin outputs and keeps the calibrated non-SU2 PH channel construction.
 It uses the no-SOC SU(2) calibration found from the explicit-spin output:
 
     K_ph^phys(q) = D(q) - C(q)
@@ -169,6 +169,22 @@ def load_case(case_dir: Path) -> CaseData:
     )
 
 
+def assert_raw_channel_compatibility(data: CaseData) -> None:
+    """Fail fast for the convention that broke the explicit-spin bridge test.
+
+    Original divERGe code shows that tu_channel_calc_project != 0 stores
+    projected channel objects rather than raw Pch/Cch/Dch.  The explicit-spin
+    diagnosis below assumes raw unprojected P/C/D tensors and constructs
+    K_ph = D - C before Pauli projection.
+    """
+    if data.SU2 == 0 and data.n_spin == 2 and data.tu_project not in (None, 0):
+        raise RuntimeError(
+            "Explicit-spin diagnosis requires raw unprojected P/C/D channels. "
+            f"This output has tu_channel_calc_project={data.tu_project}. "
+            "Rerun TUfRG_runner.py with --tu-channel-calc-project 0."
+        )
+
+
 def q_reduced(iq: int, nk: int) -> Tuple[float, float, float]:
     iq = int(iq)
     nk = int(nk)
@@ -327,6 +343,63 @@ def built_in_S(data: CaseData, sector: str) -> Optional[np.ndarray]:
     else:
         return None
     return None if x is None else np.asarray(x, dtype=float)
+
+
+def tu_component_arrays(O: Any) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return TU form-factor maps (R, ofrom, oto)."""
+    return (
+        np.asarray(getattr(O, "mi_to_R"), dtype=int),
+        np.asarray(getattr(O, "mi_to_ofrom"), dtype=int),
+        np.asarray(getattr(O, "mi_to_oto"), dtype=int),
+    )
+
+
+def onsite_A1_template(O: Any) -> np.ndarray:
+    """Uniform onsite A1 vector in the TU form-factor basis."""
+    R, ofrom, oto = tu_component_arrays(O)
+    onsite = (ofrom == oto) & np.all(R == 0, axis=1)
+    t = np.zeros(len(ofrom), dtype=complex)
+    t[onsite] = 1.0
+    return t
+
+
+def projector_remove_template(t: np.ndarray) -> np.ndarray:
+    """Return I-|t><t| for a nonzero template vector, otherwise identity."""
+    t = np.asarray(t, dtype=complex).reshape(-1)
+    n = t.size
+    norm = np.linalg.norm(t)
+    if norm <= 0:
+        return np.eye(n, dtype=complex)
+    u = t / norm
+    return np.eye(n, dtype=complex) - np.outer(u, u.conj())
+
+
+def projector_remove_onsite_components(O: Any) -> np.ndarray:
+    """Project out all onsite diagonal form-factor basis components."""
+    R, ofrom, oto = tu_component_arrays(O)
+    onsite = (ofrom == oto) & np.all(R == 0, axis=1)
+    P = np.eye(len(ofrom), dtype=complex)
+    P[onsite, :] = 0.0
+    P[:, onsite] = 0.0
+    return P
+
+
+def q0_charge_projection_diagnostics(O: Any, A: np.ndarray) -> Dict[str, float]:
+    """Return q=0 charge strengths after removing forward-scattering-like directions.
+
+    This is mainly for PH rho/charge at Gamma.  The raw Gamma charge sector often
+    contains a uniform compressibility / forward-scattering-like A1 component.  We
+    report both the raw strength and the strengths after removing the onsite A1
+    direction or all onsite components, instead of silently treating raw Gamma
+    charge as a physical ordered phase.
+    """
+    A = np.asarray(A, dtype=complex)
+    P_no_A1 = projector_remove_template(onsite_A1_template(O))
+    P_no_onsite = projector_remove_onsite_components(O)
+    return {
+        "strength_after_remove_onsite_A1": float(np.linalg.svd(P_no_A1 @ A @ P_no_A1, compute_uv=False)[0]),
+        "strength_after_remove_all_onsite": float(np.linalg.svd(P_no_onsite @ A @ P_no_onsite, compute_uv=False)[0]),
+    }
 
 
 def build_su2_kernels(data: CaseData, iq: int) -> List[Dict[str, Any]]:
@@ -490,6 +563,8 @@ def analyze_case(data: CaseData, q_labels: Sequence[str], *, n_modes: int, metho
                     "vector_kind": "right_singular_vector_of_KL_in_TU_formfactor_basis",
                     **norms,
                 }
+                if q_label == "Gamma" and str(spec["family"]) == "ph" and str(spec["sector"]) in {"ph-rho", "charge"}:
+                    row.update(q0_charge_projection_diagnostics(data.O, A))
                 if Sref is not None and q_label == "Gamma" and m < len(Sref):
                     row["builtin_S_q0_reference"] = float(Sref[m])
                     row["builtin_S_relative_mismatch"] = float(abs(s[m] - Sref[m]) / max(abs(Sref[m]), 1e-300))
@@ -532,6 +607,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     data = load_case(Path(args.case_dir))
+    assert_raw_channel_compatibility(data)
     rows, modes, report, cal_rows = analyze_case(data, args.q, n_modes=args.n_modes, method=args.method)
     outdir = data.case_dir / str(args.out)
     outdir.mkdir(parents=True, exist_ok=True)

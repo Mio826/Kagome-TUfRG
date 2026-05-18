@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-TUfRG_runner_v2.py
+TUfRG_runner.py
 Version: v2-jsonsafe-2026-05-12
 
 Official small-run / benchmark runner for the spinful kagome Kane-Mele extended
@@ -27,10 +27,13 @@ Important convention notes
 * The bosonic q mesh has nk*nk points.  M-point q indices come from nk, not nk*nkf.
 * divERGe built-in S_* postprocess outputs are q=0 only.  M-point analysis must
   use q-resolved P/C/D output later in the inspector.
-* For spinful non-SU2 runs, do not blindly reuse the SU2 statement
-  "D_saved=2D-C and -C_saved=magnetic" for final interpretation.  The runner can
-  request projected saved channels, but the inspector must analyze the spin
-  tensor structure explicitly.
+* For spinful non-SU2 runs used by our explicit-spin diagnosis, always save
+  RAW unprojected P/C/D channels: --tu-channel-calc-project 0.  Projected
+  saved channels are incompatible with the explicit-spin Pauli projection in
+  TUfRG_instability_rawguard.py.
+* Density interactions are built by the official divERGe D-channel s1=-1
+  convention by default.  The legacy manual spin enumeration can be selected
+  only for bridge tests.
 """
 
 from __future__ import annotations
@@ -253,6 +256,7 @@ def run_one_case(case_name: str, params: km.KMParameters, mesh: km.MeshParameter
     print("Output dir:", case_dir)
     print("input params:", asdict(params))
     print("mesh:", asdict(mesh))
+    print("vertex convention:", args.vertex_convention)
     print("q indices:", km.high_symmetry_q_indices(mesh.nk))
 
     model = None
@@ -260,6 +264,7 @@ def run_one_case(case_name: str, params: km.KMParameters, mesh: km.MeshParameter
     metadata: Dict[str, Any] = {
         "case": case_name,
         "input_params": asdict(params),
+        "vertex_convention": str(args.vertex_convention),
         "mesh": asdict(mesh),
         "output_dir": str(case_dir),
         "files": {"T": str(Tfile), "F": str(Ffile), "O": str(Ofile), "metadata": str(metadata_file)},
@@ -273,6 +278,7 @@ def run_one_case(case_name: str, params: km.KMParameters, mesh: km.MeshParameter
             model_outfile=str(Tfile),
             call_tu=True,
             validate_sanity=not bool(args.skip_sanity),
+            vertex_convention=str(args.vertex_convention),
         )
         summary = km.model_summary(model)
         metadata["model_summary"] = summary
@@ -364,8 +370,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
     # Postprocess controls.
     p.add_argument("--no-postprocess", action="store_true")
-    p.add_argument("--tu-channel-calc-project", type=int, default=-1,
-                   help="postprocess tu_channel_calc_project; default -1 follows projected-output convention")
+    p.add_argument("--tu-channel-calc-project", type=int, default=0,
+                   help="postprocess tu_channel_calc_project; must be 0 for explicit-spin raw-channel diagnosis")
+    p.add_argument("--allow-projected-explicit", action="store_true",
+                   help="allow nonzero tu_channel_calc_project despite explicit-spin diagnosis incompatibility")
+    p.add_argument("--vertex-convention", choices=["official_s1minus1", "manual"], default="official_s1minus1",
+                   help="interaction vertex convention; official_s1minus1 uses divERGe D-channel s1=-1")
     p.add_argument("--tu-n-decomp-values", type=int, default=16)
     p.add_argument("--tu-n-singular-values", type=int, default=16)
     p.add_argument("--tu-lingap-solver-mode", default="sss")
@@ -386,6 +396,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[List[str]] = None) -> int:
     global diverge
     args = parse_args(argv)
+    if int(args.tu_channel_calc_project) != 0 and not bool(args.allow_projected_explicit):
+        raise RuntimeError(
+            "This explicit-spin runner is meant for raw-channel diagnosis. "
+            "Use --tu-channel-calc-project 0, or pass --allow-projected-explicit for debugging only."
+        )
     mesh = make_mesh(args)
     mesh.validate()
 

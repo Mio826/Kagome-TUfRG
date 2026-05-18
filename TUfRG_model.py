@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-km_model.py
+TUfRG_model.py
 
 Official model-construction helpers for spinful kagome extended Hubbard models
 with NN and/or NNN Kane-Mele spin-orbit coupling, intended for divERGe TUFRG runs.
@@ -11,7 +11,7 @@ Scope
 This module builds and validates the MODEL only:
     * kagome lattice geometry and orbital positions;
     * spinful real-space hopping list for NN hopping + NN/NNN Kane-Mele SOC;
-    * explicit-spin density-density interaction vertices for onsite U and NN V;
+    * official divERGe D-channel density-density interaction vertices for onsite U and NN V;
     * fixed-chemical-potential OR fixed-filling chemical-potential resolution;
     * pure-numpy one-body sanity checks;
     * divERGe model initialization and TU form-factor basis generation.
@@ -43,6 +43,9 @@ N_ORB = 3
 N_SPIN = 2
 
 HopEntry = Tuple[List[int], int, int, int, int, Tuple[float, float]]
+# (chan, R, o1, o2, s1, s2, s3, s4, V). For official divERGe
+# density vertices we use chan="D" and s1=-1; s2/s3/s4 are ignored by
+# divERGe's auto-expansion but kept as zeros for dtype compatibility.
 VertexEntry = Tuple[str, List[int], int, int, int, int, int, int, Tuple[float, float]]
 
 PAIR_LABEL = {
@@ -246,11 +249,16 @@ def spinful_hoppings(
     return out
 
 
-def density_vertices(*, U: float = 0.0, V: float = 0.0, search_range: int = 2) -> List[VertexEntry]:
-    r"""Build explicit-spin density-density interaction entries.
+def density_vertices_manual(*, U: float = 0.0, V: float = 0.0, search_range: int = 2) -> List[VertexEntry]:
+    r"""Legacy explicit-spin density-density interaction entries.
 
-    We use the direct-spin convention verified by smoke tests:
+    This is the old/manual convention:
         (s1,s2,s3,s4) = (s_left,s_right,s_left,s_right).
+
+    It is kept only for bridge tests against the new official-style builder.
+    divERGe's original code/documentation treats ``rs_vertex_t`` spin/orbital
+    slots as channel-specific.  For density interactions in spinful non-SU2
+    models, the official examples use D-channel vertices with ``s1=-1``.
     """
     lattice, pos = kagome_lattice_and_positions()
     out: List[VertexEntry] = []
@@ -273,6 +281,47 @@ def density_vertices(*, U: float = 0.0, V: float = 0.0, search_range: int = 2) -
                                             s_left, s_right, s_left, s_right, (float(V), 0.0)))
     return out
 
+
+def density_vertices_official_s1minus1(*, U: float = 0.0, V: float = 0.0, search_range: int = 2) -> List[VertexEntry]:
+    r"""Official-style divERGe density-density interaction entries.
+
+    Original-code convention:
+      * use channel ``'D'`` for density-density interactions;
+      * set ``s1=-1`` so divERGe auto-generates the SU(2)-related spin
+        components using its channel-specific crossing relations.
+
+    This is the style used in divERGe's own spinful Kane-Mele/Rashba/Hubbard
+    examples.  For D-channel non-SU2 vertices, the C code expands ``s1=-1`` as
+
+        (s1,s2,s3,s4) = (si1, si1, si2, si2),
+
+    which is not the same as the old manual tuple
+
+        (s_left,s_right,s_left,s_right).
+
+    The remaining spin slots are set to zero only for dtype compatibility.
+    """
+    lattice, pos = kagome_lattice_and_positions()
+    out: List[VertexEntry] = []
+
+    for Rx in range(-search_range, search_range + 1):
+        for Ry in range(-search_range, search_range + 1):
+            for o_left in range(N_ORB):
+                for o_right in range(N_ORB):
+                    dr = displacement_vector(lattice, pos, Rx, Ry, o_left, o_right)
+                    dist = float(np.linalg.norm(dr[:2]))
+
+                    if dist < 1e-7 and abs(float(U)) > 0:
+                        out.append(("D", [Rx, Ry, 0], o_left, o_right,
+                                    -1, 0, 0, 0, (float(U), 0.0)))
+                    elif abs(dist - 0.5) < 1e-7 and abs(float(V)) > 0:
+                        out.append(("D", [Rx, Ry, 0], o_left, o_right,
+                                    -1, 0, 0, 0, (float(V), 0.0)))
+    return out
+
+
+# Default production builder: official divERGe D-channel s1=-1 convention.
+density_vertices = density_vertices_official_s1minus1
 
 kagome_spinful_hopping_entries = spinful_hoppings
 spinful_vertex_entries_density_density = density_vertices
@@ -562,6 +611,7 @@ def build_model(
     model_outfile: Optional[str] = None,
     call_tu: bool = True,
     validate_sanity: bool = True,
+    vertex_convention: str = "official_s1minus1",
 ):
     """Build and initialize a spinful divERGe kagome KM model.
 
@@ -618,7 +668,12 @@ def build_model(
     model.contents.hop = hoppings.ctypes.data
     model.contents.n_hop = hoppings.size
 
-    vertices_list = density_vertices(U=resolved_params.U, V=resolved_params.V)
+    if vertex_convention in {"official", "official_s1minus1", "s1minus1"}:
+        vertices_list = density_vertices_official_s1minus1(U=resolved_params.U, V=resolved_params.V)
+    elif vertex_convention in {"manual", "legacy_manual"}:
+        vertices_list = density_vertices_manual(U=resolved_params.U, V=resolved_params.V)
+    else:
+        raise ValueError(f"unknown vertex_convention={vertex_convention!r}; use official_s1minus1 or manual")
     vertices = diverge.alloc_array((len(vertices_list),), dtype="rs_vertex_t")
     vertices[:] = vertices_list
     model.contents.vert = vertices.ctypes.data
@@ -654,6 +709,7 @@ def build_model(
         "sanity_report": rep,
         "hop_summary": summarize_hoppings(hops),
         "vertex_summary": summarize_vertices(vertices_list),
+        "vertex_convention": str(vertex_convention),
         "q_indices": high_symmetry_q_indices(mesh.nk),
         "model_outfile": model_outfile,
         "model_checksum": checksum,
@@ -683,7 +739,7 @@ __all__ = [
     "KMParameters", "MeshParameters", "HopEntry", "VertexEntry",
     "kagome_lattice_and_positions", "displacement_vector",
     "enumerate_offdiag_bonds_at_distance", "high_symmetry_q_indices", "qmesh_reduced",
-    "spinful_hoppings", "density_vertices", "kagome_spinful_hopping_entries", "spinful_vertex_entries_density_density",
+    "spinful_hoppings", "density_vertices", "density_vertices_official_s1minus1", "density_vertices_manual", "kagome_spinful_hopping_entries", "spinful_vertex_entries_density_density",
     "summarize_hoppings", "summarize_vertices",
     "Hk_reduced", "minus_k", "time_reversal_unitary", "Sz_matrix",
     "band_energies", "estimate_filling", "solve_mu_for_filling", "resolve_parameters",
