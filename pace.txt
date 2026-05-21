@@ -63,3 +63,84 @@ git log -1 --oneline
 echo
 echo "Top-level tree:"
 find . -maxdepth 2 -type f | sed 's#^\./##' | sort | head -200
+
+
+
+
+
+
+
+
+
+cd /storage/home/hcoda1/4/mli326/scratch/divERGe_test_run/runs
+
+cases=(
+  "U1p5_V0p0:1.5:0.0"
+  "U0p0_V1p5:0.0:1.5"
+  "U1p5_V1p5:1.5:1.5"
+  "U3p0_V1p5:3.0:1.5"
+)
+
+lambdas=(
+  "0p0:0.0"
+  "0p1:0.1"
+  "0p5:0.5"
+)
+
+for lam in "${lambdas[@]}"
+do
+  IFS=":" read -r LTAG LNN <<< "$lam"
+
+  for case in "${cases[@]}"
+  do
+    IFS=":" read -r NAME U V <<< "$case"
+
+    TAG=soc_lnn${LTAG}_${NAME}_snap_nk18_nkf12_tu2p01_thr8
+
+    sbatch \
+      --cpus-per-task=8 \
+      --export=ALL,\
+U=${U},V=${V},\
+LAMBDA_NN=${LNN},LAMBDA_NNN=0.0,\
+NK=18,NKF=12,TU_DISTANCE=2.01,\
+NITER=100,MAXVERT=80.0,\
+TAG=${TAG},\
+SNAPSHOT_EVERY=5,SNAPSHOT_AFTER=1,SNAPSHOT_FINAL=1 \
+      slurm/run_tufrg_snapshot_openmp_pace.sbatch
+  done
+done
+
+
+
+
+
+cd /storage/home/hcoda1/4/mli326/scratch/divERGe_test_run/runs
+
+cases=(
+  "U1p5_V0p0"
+  "U0p0_V1p5"
+  "U1p5_V1p5"
+  "U3p0_V1p5"
+)
+
+lambdas=(
+  "0p0"
+  "0p1"
+  "0p5"
+)
+
+for LTAG in "${lambdas[@]}"
+do
+  for NAME in "${cases[@]}"
+  do
+    CASE_DIR=km_spinful_runs/soc_lnn${LTAG}_${NAME}_snap_nk18_nkf12_tu2p01_thr8
+
+    sbatch \
+      --export=ALL,\
+CASE_DIR=${CASE_DIR},\
+N_MODES=8,\
+ORDER_TOP_COMPONENTS=30,\
+SKIP_EXISTING=1 \
+      slurm/run_tufrg_diagnose_snapshots_pace.sbatch
+  done
+done

@@ -4,14 +4,14 @@
 TUfRG_model.py
 
 Official model-construction helpers for spinful kagome extended Hubbard models
-with NN and/or NNN Kane-Mele spin-orbit coupling, intended for divERGe TUFRG runs.
+with NN/NNN Kane-Mele spin-orbit coupling and U/V1/V2 density interactions, intended for divERGe TUFRG runs.
 
 Scope
 -----
 This module builds and validates the MODEL only:
     * kagome lattice geometry and orbital positions;
     * spinful real-space hopping list for NN hopping + NN/NNN Kane-Mele SOC;
-    * official divERGe D-channel density-density interaction vertices for onsite U and NN V;
+    * official divERGe D-channel density-density interaction vertices for onsite U, NN V1, and second-neighbor V2;
     * fixed-chemical-potential OR fixed-filling chemical-potential resolution;
     * pure-numpy one-body sanity checks;
     * divERGe model initialization and TU form-factor basis generation.
@@ -78,7 +78,8 @@ class KMParameters:
     lambda_nn: float = 0.0
     lambda_nnn: float = 0.0
     U: float = 0.0
-    V: float = 0.0
+    V1: float = 0.0
+    V2: float = 0.0
     filling_ngrid: int = 120
 
     def validate(self) -> None:
@@ -249,7 +250,7 @@ def spinful_hoppings(
     return out
 
 
-def density_vertices_manual(*, U: float = 0.0, V: float = 0.0, search_range: int = 2) -> List[VertexEntry]:
+def density_vertices_manual(*, U: float = 0.0, V1: float = 0.0, V2: float = 0.0, search_range: int = 2) -> List[VertexEntry]:
     r"""Legacy explicit-spin density-density interaction entries.
 
     This is the old/manual convention:
@@ -274,15 +275,20 @@ def density_vertices_manual(*, U: float = 0.0, V: float = 0.0, search_range: int
                         for s_left, s_right in ((SPIN_UP, SPIN_DN), (SPIN_DN, SPIN_UP)):
                             out.append(("D", [Rx, Ry, 0], o_left, o_right,
                                         s_left, s_right, s_left, s_right, (float(U), 0.0)))
-                    elif abs(dist - 0.5) < 1e-7 and abs(float(V)) > 0:
+                    elif abs(dist - 0.5) < 1e-7 and abs(float(V1)) > 0:
                         for s_left in (SPIN_UP, SPIN_DN):
                             for s_right in (SPIN_UP, SPIN_DN):
                                 out.append(("D", [Rx, Ry, 0], o_left, o_right,
-                                            s_left, s_right, s_left, s_right, (float(V), 0.0)))
+                                            s_left, s_right, s_left, s_right, (float(V1), 0.0)))
+                    elif abs(dist - np.sqrt(3.0) / 2.0) < 1e-7 and abs(float(V2)) > 0:
+                        for s_left in (SPIN_UP, SPIN_DN):
+                            for s_right in (SPIN_UP, SPIN_DN):
+                                out.append(("D", [Rx, Ry, 0], o_left, o_right,
+                                            s_left, s_right, s_left, s_right, (float(V2), 0.0)))
     return out
 
 
-def density_vertices_official_s1minus1(*, U: float = 0.0, V: float = 0.0, search_range: int = 2) -> List[VertexEntry]:
+def density_vertices_official_s1minus1(*, U: float = 0.0, V1: float = 0.0, V2: float = 0.0, search_range: int = 2) -> List[VertexEntry]:
     r"""Official-style divERGe density-density interaction entries.
 
     Original-code convention:
@@ -314,9 +320,12 @@ def density_vertices_official_s1minus1(*, U: float = 0.0, V: float = 0.0, search
                     if dist < 1e-7 and abs(float(U)) > 0:
                         out.append(("D", [Rx, Ry, 0], o_left, o_right,
                                     -1, 0, 0, 0, (float(U), 0.0)))
-                    elif abs(dist - 0.5) < 1e-7 and abs(float(V)) > 0:
+                    elif abs(dist - 0.5) < 1e-7 and abs(float(V1)) > 0:
                         out.append(("D", [Rx, Ry, 0], o_left, o_right,
-                                    -1, 0, 0, 0, (float(V), 0.0)))
+                                    -1, 0, 0, 0, (float(V1), 0.0)))
+                    elif abs(dist - np.sqrt(3.0) / 2.0) < 1e-7 and abs(float(V2)) > 0:
+                        out.append(("D", [Rx, Ry, 0], o_left, o_right,
+                                    -1, 0, 0, 0, (float(V2), 0.0)))
     return out
 
 
@@ -341,13 +350,21 @@ def summarize_hoppings(hops: Sequence[HopEntry]) -> Dict[str, int]:
 
 
 def summarize_vertices(vertices: Sequence[VertexEntry]) -> Dict[str, int]:
-    """Count onsite-U-like and NN-V-like vertex entries."""
+    """Count onsite-U, NN-V1, and second-neighbor-V2 vertex entries."""
+    lattice, pos = kagome_lattice_and_positions()
     counts: Counter[str] = Counter()
     for _chan, R, o1, o2, *_rest in vertices:
         if o1 == o2 and list(R) == [0, 0, 0]:
             counts["onsite_U_like"] += 1
+            continue
+        dr = displacement_vector(lattice, pos, int(R[0]), int(R[1]), int(o1), int(o2))
+        dist = float(np.linalg.norm(dr[:2]))
+        if abs(dist - 0.5) < 1e-7:
+            counts["NN_V1_like"] += 1
+        elif abs(dist - np.sqrt(3.0) / 2.0) < 1e-7:
+            counts["NNN_V2_like"] += 1
         else:
-            counts["NN_V_like"] += 1
+            counts["other_vertex"] += 1
     return dict(counts)
 
 
@@ -669,9 +686,9 @@ def build_model(
     model.contents.n_hop = hoppings.size
 
     if vertex_convention in {"official", "official_s1minus1", "s1minus1"}:
-        vertices_list = density_vertices_official_s1minus1(U=resolved_params.U, V=resolved_params.V)
+        vertices_list = density_vertices_official_s1minus1(U=resolved_params.U, V1=resolved_params.V1, V2=resolved_params.V2)
     elif vertex_convention in {"manual", "legacy_manual"}:
-        vertices_list = density_vertices_manual(U=resolved_params.U, V=resolved_params.V)
+        vertices_list = density_vertices_manual(U=resolved_params.U, V1=resolved_params.V1, V2=resolved_params.V2)
     else:
         raise ValueError(f"unknown vertex_convention={vertex_convention!r}; use official_s1minus1 or manual")
     vertices = diverge.alloc_array((len(vertices_list),), dtype="rs_vertex_t")

@@ -9,6 +9,9 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
+#SBATCH --mail-type=BEGIN,END,FAIL
+#SBATCH --mail-user=miaoli@gatech.edu
+
 
 set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"

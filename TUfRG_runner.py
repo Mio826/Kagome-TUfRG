@@ -2,7 +2,7 @@
 # coding: utf-8
 """
 TUfRG_runner.py
-Version: v2-jsonsafe-2026-05-12
+Version: v2plusV2-2026-05-21
 
 Official small-run / benchmark runner for the spinful kagome Kane-Mele extended
 Hubbard model built by TUfRG_model.py.
@@ -49,7 +49,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
-import TUfRG_model as km
+import TUfRG_model_v2 as km
 
 # Loaded in main(); kept global so helper functions can use the same module.
 diverge = None
@@ -88,18 +88,30 @@ def _json_safe(obj: Any) -> Any:
     return str(obj)
 
 
-def parse_case(case: str) -> Tuple[str, float, float]:
-    """Parse a case string NAME:U:V."""
+def effective_single_V1(args: argparse.Namespace) -> float:
+    """Return V1 for single-case mode. --V is kept as an alias for --V1."""
+    if args.V1 is not None:
+        return float(args.V1)
+    if args.V is not None:
+        return float(args.V)
+    return 0.0
+
+
+def parse_case(case: str, *, default_V2: float = 0.0) -> Tuple[str, float, float, float]:
+    """Parse NAME:U:V1 or NAME:U:V1:V2."""
     parts = case.split(":")
-    if len(parts) != 3:
-        raise ValueError(f"Bad --case {case!r}; expected NAME:U:V")
-    name, U, V = parts
+    if len(parts) not in (3, 4):
+        raise ValueError(f"Bad --case {case!r}; expected NAME:U:V1 or NAME:U:V1:V2")
+    name = parts[0]
     if not name:
         raise ValueError("case name must be non-empty")
-    return name, float(U), float(V)
+    U = float(parts[1])
+    V1 = float(parts[2])
+    V2 = float(parts[3]) if len(parts) == 4 else float(default_V2)
+    return name, U, V1, V2
 
 
-def make_params(args: argparse.Namespace, *, U: float, V: float) -> km.KMParameters:
+def make_params(args: argparse.Namespace, *, U: float, V1: float, V2: float) -> km.KMParameters:
     return km.KMParameters(
         t=float(args.t),
         mu=float(args.mu),
@@ -108,7 +120,8 @@ def make_params(args: argparse.Namespace, *, U: float, V: float) -> km.KMParamet
         lambda_nn=float(args.lambda_nn),
         lambda_nnn=float(args.lambda_nnn),
         U=float(U),
-        V=float(V),
+        V1=float(V1),
+        V2=float(V2),
         filling_ngrid=int(args.filling_ngrid),
     )
 
@@ -333,10 +346,10 @@ def run_one_case(case_name: str, params: km.KMParameters, mesh: km.MeshParameter
                 print("WARNING: model_free failed:", repr(exc))
 
 
-def build_case_list(args: argparse.Namespace) -> List[Tuple[str, float, float]]:
+def build_case_list(args: argparse.Namespace) -> List[Tuple[str, float, float, float]]:
     if args.case:
-        return [parse_case(x) for x in args.case]
-    return [(str(args.tag), float(args.U), float(args.V))]
+        return [parse_case(x, default_V2=float(args.V2)) for x in args.case]
+    return [(str(args.tag), float(args.U), effective_single_V1(args), float(args.V2))]
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -344,7 +357,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
     # Physical parameters.
     p.add_argument("--U", type=float, default=0.2, help="onsite Hubbard U for single-case mode")
-    p.add_argument("--V", type=float, default=0.0, help="NN density interaction V for single-case mode")
+    p.add_argument("--V", type=float, default=None, help="alias for --V1, kept for backward-compatible old commands")
+    p.add_argument("--V1", type=float, default=None, help="NN density interaction V1 for single-case mode")
+    p.add_argument("--V2", type=float, default=0.0, help="second-neighbor density interaction V2 for single-case mode")
     p.add_argument("--t", type=float, default=1.0, help="positive t; real NN hopping is -t")
     p.add_argument("--mu", type=float, default=0.0, help="chemical potential for fixed_mu mode")
     p.add_argument("--target-filling", type=float, default=5.0 / 12.0, help="target filling fraction for fixed_filling mode")
@@ -384,7 +399,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--outdir", default="km_spinful_runs")
     p.add_argument("--tag", default="run", help="case name for single-case mode")
     p.add_argument("--case", action="append", default=None,
-                   help="batch case NAME:U:V; can be repeated. Uses common t/mu/SOC/mesh/flow settings.")
+                   help="batch case NAME:U:V1 or NAME:U:V1:V2; can be repeated. Uses common t/mu/SOC/mesh/flow settings.")
 
     # Runtime.
     p.add_argument("--skip-sanity", action="store_true", help="skip pure-numpy model sanity check before building")
@@ -417,8 +432,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("WARNING: mpi_loglevel_set failed:", repr(exc))
 
         all_metadata: List[Dict[str, Any]] = []
-        for name, U, V in cases:
-            params = make_params(args, U=U, V=V)
+        for name, U, V1, V2 in cases:
+            params = make_params(args, U=U, V1=V1, V2=V2)
             params.validate()
             md = run_one_case(name, params, mesh, args)
             all_metadata.append(md)

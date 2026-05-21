@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-TUfRG_formfactor_from_modes_v1.py
-Version: v1-from-loop-dressed-instability-modes-2026-05-13
+TUfRG_formfactor_from_modes.py
+Version: structuraldiag-raw-proxy-warning-2026-05-19
 
 Level-2 form-factor classifier for TUFRG instability modes.
 
 Input must come from TUfRG_instability_v1.py, especially instability_modes.npz.
 This file does NOT read raw Pvec/Cvec/Dvec.  It classifies the loop-dressed
 right singular vectors produced by Level 1.
+
+Important: raw_real_bond_proxy_weight and raw_imag_bond_proxy_weight
+are global-phase dependent diagnostics of the SVD mode.  They are kept only
+as quick hints.  Do not use them as final CBO/LCO classification.  Use the
+structural classifier in TUfRG_realspace_from_modes_clean.py or the
+structural summary it writes instead.
 
 Outputs
 -------
@@ -127,8 +133,9 @@ def summarize_vector(O: Any, f: np.ndarray) -> Dict[str, float]:
         "long_weight": weight(f, masks["long"]),
         "diagonal_weight": weight(f, masks["diagonal"]),
         "offdiag_weight": weight(f, masks["offdiag"]),
-        "real_bond_proxy_weight": real_proxy,
-        "imag_bond_proxy_weight": imag_proxy,
+        "raw_real_bond_proxy_weight": real_proxy,
+        "raw_imag_bond_proxy_weight": imag_proxy,
+        "raw_ReIm_proxy_phase_warning": "global-phase-dependent; not final CBO/LCO evidence",
     }
     out.update(onsite_irrep_summary(O, f))
     return out
@@ -147,7 +154,7 @@ def classify(row: Mapping[str, Any]) -> str:
     sector = str(row.get("sector", ""))
     onsite = float(row.get("onsite_weight", 0.0))
     nn = float(row.get("nn_weight", 0.0))
-    imag = float(row.get("imag_bond_proxy_weight", 0.0))
+    imag = float(row.get("raw_imag_bond_proxy_weight", row.get("raw_imag_bond_proxy_weight", 0.0)))
     a1_within = float(row.get("onsite_A1_weight_within_onsite", 0.0))
     e_within = float(row.get("onsite_E_weight_within_onsite", 0.0))
     onsite_frac = float(row.get("onsite_diag_norm_fraction", 0.0))

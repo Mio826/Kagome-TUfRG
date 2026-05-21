@@ -2,7 +2,7 @@
 # coding: utf-8
 """
 TUfRG_instability.py
-Version: clean-rawguard-q0A1-2026-05-18
+Version: structuraldiag-top8-2026-05-19
 
 Level-1 instability inspector for divERGe TUFRG output.
 
@@ -35,7 +35,8 @@ Important scope
    singular values of K(q) @ L(q), not from raw Pvec/Cvec/Dvec.
 2. It does not classify form factors. Use TUfRG_formfactor_from_modes_v1.py on
    the output modes.
-3. For SU2-projected PRR-style output, the established convention is retained:
+3. Default --n-modes is 8 so downstream structural order classifiers can inspect near-degenerate subspaces.
+4. For SU2-projected structural output, the established convention is retained:
 
        K_sc     = P_saved
        K_charge = D_saved             if tu_channel_calc_project != 0
@@ -598,7 +599,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Calibrated loop-dressed Level-1 TUFRG instability diagnosis.")
     p.add_argument("case_dir", help="case directory containing O.dvg")
     p.add_argument("--q", nargs="+", default=list(DEFAULT_Q), help="q labels or numeric q indices")
-    p.add_argument("--n-modes", type=int, default=4, help="number of singular modes saved per sector/q")
+    p.add_argument("--n-modes", type=int, default=8, help="number of singular modes saved per sector/q; default increased for near-degenerate M-point/subspace diagnosis")
     p.add_argument("--method", choices=["svd", "hermitian", "both"], default="svd")
     p.add_argument("--out", default="instability")
     return p.parse_args(argv)

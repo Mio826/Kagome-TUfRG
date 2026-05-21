@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-TUfRG_realspace_from_modes_v1.py
-Version: v1-loop-dressed-modes-2026-05-13
+TUfRG_realspace_from_modes.py
+Version: structuraldiag-bond-pair-lco-2026-05-19
 
 Real-space / orbital-space reconstruction for calibrated TUFRG instability modes.
 
@@ -24,6 +24,15 @@ Scope and interpretation
 * For PH current fingerprints, rho and sz sectors use the spin-diagonal hopping
   matrix t_up/t_down to report charge-current and spin-z-current proxies,
   including real-hop and SOC-hop split columns.
+* This version also writes structural bond-pair diagnostics:
+
+      bond_pair_components.csv
+      structural_order_summary.csv
+
+  The structural LCO score uses the q-unwound form factor and its
+  symmetric/antisymmetric structure under bond reversal,
+      (R,a,b) <-> (-R,b,a),
+  not the raw imaginary part of an arbitrary SVD eigenvector.
 """
 from __future__ import annotations
 
@@ -159,6 +168,192 @@ def component_masks(O: Any) -> Dict[str, np.ndarray]:
     offdiag = ~diagonal
     long = ~(onsite | nn)
     return {"onsite": onsite, "nn": nn, "diagonal": diagonal, "offdiag": offdiag, "long": long}
+
+
+# -----------------------------------------------------------------------------
+# structural diagnostics for CBO/LCO
+# -----------------------------------------------------------------------------
+
+def norm2_vec(x: np.ndarray) -> float:
+    x = np.asarray(x, dtype=complex).reshape(-1)
+    return float(np.vdot(x, x).real)
+
+
+def reverse_index_map(O: Any) -> np.ndarray:
+    """Map alpha=(R,ofrom,oto) to reverse alpha_bar=(-R,oto,ofrom).
+
+    This is the structural operation appearing in the structural distinction
+    between bond order and loop-current order.  It is a linear bond-reversal
+    operation, not complex conjugation.
+    """
+    R, ofrom, oto = get_mi_arrays(O)
+    keys = {}
+    for i in range(len(ofrom)):
+        keys[(tuple(int(x) for x in R[i]), int(ofrom[i]), int(oto[i]))] = i
+    rev = np.full(len(ofrom), -1, dtype=int)
+    for i in range(len(ofrom)):
+        rrev = tuple(int(-x) for x in R[i])
+        rev[i] = int(keys.get((rrev, int(oto[i]), int(ofrom[i])), -1))
+    return rev
+
+
+def q_unwind_formfactor(O: Any, f: np.ndarray, qred: Sequence[float]) -> Tuple[np.ndarray, np.ndarray]:
+    """Remove the structural convention factor exp(i q.R) from a TU form factor.
+
+    The finite-q convention writes finite-M orders schematically as Delta(R)=exp(i M.R)*tildeDelta(R)
+    (plus an extra i for LCO).  The structural symmetric/antisymmetric test is
+    performed on tildeDelta, not on the raw Delta.
+    """
+    R, _, _ = get_mi_arrays(O)
+    q = np.asarray(list(qred) + [0.0, 0.0, 0.0], dtype=float)[: R.shape[1]]
+    phase = np.exp(-2j * np.pi * (R @ q))
+    return np.asarray(f, dtype=complex).reshape(-1) * phase, phase
+
+
+def structural_label_from_scores(sector: str, q_label: str, onsite: float, sym_nn: float, antisym_nn: float) -> str:
+    """Conservative structural label from structural weights."""
+    sector = str(sector)
+    q_label = str(q_label)
+    is_charge = sector in {"ph-rho", "charge"} or "rho" in sector
+    is_spin = sector in {"ph-sz", "mag"} or sector.startswith("ph-s")
+    is_gamma = q_label in {"Gamma", "G", "q0", "0", "iq0"}
+
+    if is_charge:
+        if antisym_nn > 0.35 and onsite < 0.25:
+            return "q0-charge-LCO-like" if is_gamma else "finiteQ-charge-LCO-like"
+        if sym_nn > 0.35:
+            return "q0-CBO/nematic-like" if is_gamma else "finiteQ-CBO-like"
+        if onsite > 0.40:
+            return "q0-charge-onsite/forward-like" if is_gamma else "finiteQ-CDW-like"
+        return "charge-mixed"
+
+    if is_spin:
+        if antisym_nn > 0.35 and onsite < 0.25:
+            return "q0-spin-LCO-like" if is_gamma else "finiteQ-spin-LCO-like"
+        if sym_nn > 0.35:
+            return "q0-SBO-like" if is_gamma else "finiteQ-SBO-like"
+        if onsite > 0.40:
+            return "FM-like" if is_gamma else "finiteQ-SDW-like"
+        return "spin-mixed"
+
+    return "not-PH-charge/spin-classified"
+
+
+def structural_bond_pair_diagnostics(
+    O: Any,
+    f: np.ndarray,
+    row: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Compute structural bond-reversal structural weights for one mode.
+
+    The phase-invariant structural distinction is:
+
+        tildeF_sym  = (tildeF(R,a,b) + tildeF(-R,b,a)) / 2
+        tildeF_asym = (tildeF(R,a,b) - tildeF(-R,b,a)) / 2
+
+    where tildeF = exp(-i q.R) F.  This mimics the structural convention
+    Delta_LCO(R)=i exp(i q.R) tildeDelta(R), with tildeDelta antisymmetric
+    under bond reversal.  Because the operation is linear, the weights are
+    invariant under the arbitrary global phase of the SVD vector.
+    """
+    nk = infer_nk(O, metadata)
+    qred = parse_q_reduced(row.get("q_reduced", ""), int(row.get("iq", 0)), nk)
+    f = np.asarray(f, dtype=complex).reshape(-1)
+    ftilde, unwind_phase = q_unwind_formfactor(O, f, qred)
+    R, ofrom, oto = get_mi_arrays(O)
+    masks = component_masks(O)
+    rev = reverse_index_map(O)
+
+    sym = np.zeros_like(ftilde)
+    asym = np.zeros_like(ftilde)
+    matched = rev >= 0
+    for i in range(len(ftilde)):
+        j = rev[i]
+        if j >= 0:
+            sym[i] = 0.5 * (ftilde[i] + ftilde[j])
+            asym[i] = 0.5 * (ftilde[i] - ftilde[j])
+
+    total = norm2_vec(ftilde)
+    if total <= 1e-300:
+        total = 1.0
+
+    def w(mask: np.ndarray, vec: np.ndarray = ftilde) -> float:
+        mask = np.asarray(mask, dtype=bool) & matched
+        return float(norm2_vec(vec[mask]) / total) if np.any(mask) else 0.0
+
+    onsite_w = w(masks["onsite"], ftilde)
+    nn_w = w(masks["nn"], ftilde)
+    sym_nn_w = w(masks["nn"], sym)
+    antisym_nn_w = w(masks["nn"], asym)
+    sym_all_w = w(np.ones(len(ftilde), dtype=bool), sym)
+    antisym_all_w = w(np.ones(len(ftilde), dtype=bool), asym)
+    unmatched_w = float(norm2_vec(ftilde[~matched]) / total) if np.any(~matched) else 0.0
+
+    mode_key = str(row.get("mode_key", ""))
+    sector = str(row.get("sector", ""))
+    q_label = str(row.get("q_label", ""))
+    summary = {
+        "mode_key": mode_key,
+        "family": row.get("family", ""),
+        "sector": sector,
+        "q_label": q_label,
+        "mode": row.get("mode", ""),
+        "strength_svd_KL": row.get("strength_svd_KL", ""),
+        "structural_norm2": float(total),
+        "structural_onsite_weight": onsite_w,
+        "structural_nn_weight": nn_w,
+        "structural_symmetric_nn_weight": sym_nn_w,
+        "structural_antisymmetric_nn_weight": antisym_nn_w,
+        "structural_symmetric_all_weight": sym_all_w,
+        "structural_antisymmetric_all_weight": antisym_all_w,
+        "structural_unmatched_reverse_weight": unmatched_w,
+        "structural_lco_score": antisym_nn_w,
+        "structural_cbo_sbo_score": sym_nn_w,
+        "structural_label": structural_label_from_scores(sector, q_label, onsite_w, sym_nn_w, antisym_nn_w),
+        "structural_note": "q-unwound linear bond-reversal symmetric/antisymmetric weights; not raw Re/Im",
+    }
+
+    comp_rows: List[Dict[str, Any]] = []
+    for i in range(len(ftilde)):
+        j = int(rev[i])
+        base = {
+            "mode_key": mode_key,
+            "family": row.get("family", ""),
+            "sector": sector,
+            "q_label": q_label,
+            "mode": row.get("mode", ""),
+            "alpha": int(i),
+            "reverse_alpha": j,
+            "R0": int(R[i, 0]),
+            "R1": int(R[i, 1]),
+            "R2": int(R[i, 2]) if R.shape[1] > 2 else 0,
+            "ofrom": int(ofrom[i]),
+            "oto": int(oto[i]),
+            "is_onsite": bool(masks["onsite"][i]),
+            "is_NN": bool(masks["nn"][i]),
+            "is_matched_reverse": bool(j >= 0),
+            "q_unwind_phase_real": float(np.real(unwind_phase[i])),
+            "q_unwind_phase_imag": float(np.imag(unwind_phase[i])),
+            "F_raw_real": float(np.real(f[i])),
+            "F_raw_imag": float(np.imag(f[i])),
+            "F_tilde_real": float(np.real(ftilde[i])),
+            "F_tilde_imag": float(np.imag(ftilde[i])),
+            "F_sym_real": float(np.real(sym[i])),
+            "F_sym_imag": float(np.imag(sym[i])),
+            "F_antisym_real": float(np.real(asym[i])),
+            "F_antisym_imag": float(np.imag(asym[i])),
+            "abs_F_tilde2": float(abs(ftilde[i]) ** 2),
+            "abs_F_sym2": float(abs(sym[i]) ** 2),
+            "abs_F_antisym2": float(abs(asym[i]) ** 2),
+        }
+        if j >= 0:
+            base.update({
+                "F_reverse_tilde_real": float(np.real(ftilde[j])),
+                "F_reverse_tilde_imag": float(np.imag(ftilde[j])),
+            })
+        comp_rows.append(base)
+    return summary, comp_rows
 
 
 def realspace_coordinates(cell: Tuple[int, int], orbital: int) -> np.ndarray:
@@ -337,7 +532,7 @@ def build_combined_mode(rows: pd.DataFrame, modes: Mapping[str, np.ndarray], O: 
     return total
 
 
-def reconstruct(case_dir: Path, rows: pd.DataFrame, modes: Mapping[str, np.ndarray], args: argparse.Namespace) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+def reconstruct(case_dir: Path, rows: pd.DataFrame, modes: Mapping[str, np.ndarray], args: argparse.Namespace) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     O = load_output(case_dir / "O.dvg")
     metadata = read_json(case_dir / "metadata.json")
     R, ofrom, oto = get_mi_arrays(O)
@@ -356,6 +551,17 @@ def reconstruct(case_dir: Path, rows: pd.DataFrame, modes: Mapping[str, np.ndarr
     bond_rows: List[Dict[str, Any]] = []
     current_rows: List[Dict[str, Any]] = []
     pairing_rows: List[Dict[str, Any]] = []
+    structural_summary_rows: List[Dict[str, Any]] = []
+    bond_pair_rows: List[Dict[str, Any]] = []
+
+    # structural diagnostics are done per selected Level-1 mode,
+    # before optional real-space supercell/phase combination used for plotting.
+    for _, r in rows.iterrows():
+        key = str(r["mode_key"])
+        if key in modes:
+            one_summary, one_components = structural_bond_pair_diagnostics(O, np.asarray(modes[key], dtype=complex).reshape(-1), r, metadata)
+            structural_summary_rows.append(one_summary)
+            bond_pair_rows.extend(one_components)
 
     for cx in range(Nx):
         for cy in range(Ny):
@@ -436,7 +642,7 @@ def reconstruct(case_dir: Path, rows: pd.DataFrame, modes: Mapping[str, np.ndarr
     summary_rows = []
     for _, r in rows.iterrows():
         summary_rows.append({k: r[k] for k in r.index})
-    return site_rows, bond_rows, current_rows, pairing_rows, summary_rows
+    return site_rows, bond_rows, current_rows, pairing_rows, summary_rows, bond_pair_rows, structural_summary_rows
 
 
 # -----------------------------------------------------------------------------
@@ -532,7 +738,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if len(set(rows["family"].astype(str))) != 1 or len(set(rows["sector"].astype(str))) != 1:
         raise SystemExit("Selected rows must have a single family and single sector for one real-space reconstruction. Run separate commands otherwise.")
 
-    site_rows, bond_rows, current_rows, pairing_rows, selected_rows = reconstruct(case_dir, rows, modes, args)
+    site_rows, bond_rows, current_rows, pairing_rows, selected_rows, bond_pair_rows, structural_summary_rows = reconstruct(case_dir, rows, modes, args)
     outdir = case_dir / str(args.out) / analysis_name(rows, args)
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -541,6 +747,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     write_csv(outdir / "bond_pattern.csv", bond_rows)
     write_csv(outdir / "current_pattern.csv", current_rows)
     write_csv(outdir / "pairing_pattern.csv", pairing_rows)
+    write_csv(outdir / "bond_pair_components.csv", bond_pair_rows)
+    write_csv(outdir / "structural_order_summary.csv", structural_summary_rows)
 
     if not args.no_plot:
         plot_pattern_png(outdir / "pattern.png", site_rows, bond_rows, current_rows, pairing_rows)
