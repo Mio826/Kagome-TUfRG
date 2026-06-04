@@ -49,7 +49,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
-import TUfRG_model_v2 as km
+import TUfRG_model as km
 
 # Loaded in main(); kept global so helper functions can use the same module.
 diverge = None

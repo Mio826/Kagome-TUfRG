@@ -119,6 +119,14 @@ def corrected_ordering_strength(row: pd.Series) -> float:
     fam = str(row.get("family", ""))
     sec = str(row.get("sector", ""))
 
+    # New default: projected Gamma charge/rho modes are real rows with their own vectors.
+    # Their strength is already the projected SVD strength.
+    if q == "Gamma" and fam == "ph" and sec in {"ph-rho-A1proj", "charge-A1proj"}:
+        return raw
+
+    # Keep raw Gamma ph-rho as a diagnostic row only. Do not let it win the
+    # global top competition when projected A1 rows exist, otherwise strength
+    # and eigenvector are not mode-aligned.
     if q == "Gamma" and fam == "ph" and sec in {"ph-rho", "charge"}:
         val = row.get("strength_after_remove_onsite_A1", np.nan)
         try:
@@ -127,8 +135,8 @@ def corrected_ordering_strength(row: pd.Series) -> float:
                 return val
         except Exception:
             pass
-    return raw
 
+    return raw
 
 def get_strength(inst: pd.DataFrame, q: str, family: str, sector: str, corrected: bool = True) -> float:
     if inst.empty:
@@ -211,6 +219,94 @@ def load_flow_row(case_dir: Path, iteration: Optional[int]) -> Dict[str, float]:
     return out
 
 
+
+def select_best_inst_row(inst: pd.DataFrame, mask: pd.Series, strength_col: str = "ordering_strength"):
+    if inst.empty:
+        return None
+    df = inst[mask].copy()
+    if df.empty:
+        return None
+    if strength_col not in df.columns:
+        strength_col = "strength_svd_KL"
+    vals = pd.to_numeric(df[strength_col], errors="coerce")
+    if vals.isna().all():
+        return None
+    return df.iloc[vals.fillna(-np.inf).argmax()]
+
+
+def order_row_by_mode_key(order: pd.DataFrame, mode_key: object):
+    if order.empty:
+        return None
+    df = order[order["mode_key"].astype(str) == str(mode_key)]
+    if df.empty:
+        return None
+    return df.iloc[0]
+
+
+def add_mode_aligned_fields(row: Dict[str, object], prefix: str, inst_row, order: pd.DataFrame) -> None:
+    """Append mode-aligned strength and structural classification fields.
+
+    This is the important summary fix: the LCO/CBO scores written here belong
+    to exactly the same mode_key as the strength.
+    """
+    if inst_row is None:
+        return
+
+    row[f"{prefix}_mode_key"] = inst_row.get("mode_key", "")
+    row[f"{prefix}_q"] = inst_row.get("q_label", "")
+    row[f"{prefix}_family"] = inst_row.get("family", "")
+    row[f"{prefix}_sector"] = inst_row.get("sector", "")
+    row[f"{prefix}_mode"] = inst_row.get("mode", "")
+    row[f"{prefix}_strength"] = float(inst_row.get("ordering_strength", inst_row.get("strength_svd_KL", np.nan)))
+    row[f"{prefix}_strength_raw"] = float(inst_row.get("strength_svd_KL", np.nan))
+
+    o = order_row_by_mode_key(order, inst_row.get("mode_key", ""))
+    if o is None:
+        return
+
+    for c in [
+        "order_label",
+        "onsite_weight",
+        "nn_weight",
+        "long_weight",
+        "diagonal_weight",
+        "offdiag_weight",
+        "bond_symmetric_nn_weight",
+        "bond_antisymmetric_nn_weight",
+        "LCO_score",
+        "CBO_SBO_score",
+    ]:
+        if c in o.index:
+            row[f"{prefix}_{c}"] = o.get(c, np.nan)
+
+
+def get_strength_any_sector(inst: pd.DataFrame, q: str, family: str, sectors: Sequence[str], corrected: bool = True) -> float:
+    if inst.empty:
+        return np.nan
+    df = inst[
+        (inst["q_label"].astype(str) == q)
+        & (inst["family"].astype(str) == family)
+        & (inst["sector"].astype(str).isin(list(sectors)))
+    ].copy()
+    if df.empty:
+        return np.nan
+    if corrected and "ordering_strength" in df.columns:
+        vals = pd.to_numeric(df["ordering_strength"], errors="coerce")
+    elif corrected:
+        vals = df.apply(corrected_ordering_strength, axis=1).astype(float)
+    else:
+        vals = pd.to_numeric(df["strength_svd_KL"], errors="coerce")
+    return float(vals.max())
+
+
+def get_score_for_top_mode(order: pd.DataFrame, inst_row, score_col: str) -> float:
+    if inst_row is None or order.empty or score_col not in order.columns:
+        return np.nan
+    o = order_row_by_mode_key(order, inst_row.get("mode_key", ""))
+    if o is None:
+        return np.nan
+    return float(pd.to_numeric(pd.Series([o.get(score_col, np.nan)]), errors="coerce").iloc[0])
+
 def collect_one_snapshot(
     case_dir: Path,
     snap: Path,
@@ -234,6 +330,22 @@ def collect_one_snapshot(
     if not inst.empty:
         inst = inst.copy()
         inst["ordering_strength"] = inst.apply(corrected_ordering_strength, axis=1)
+
+        # If A1-projected Gamma charge/rho rows exist, raw Gamma ph-rho/charge rows
+        # must not be used as physical top modes, because their vector is raw.
+        has_A1proj = (
+            (inst["q_label"].astype(str) == "Gamma")
+            & (inst["family"].astype(str) == "ph")
+            & (inst["sector"].astype(str).isin(["ph-rho-A1proj", "charge-A1proj"]))
+        ).any()
+        if has_A1proj:
+            raw_gamma_charge = (
+                (inst["q_label"].astype(str) == "Gamma")
+                & (inst["family"].astype(str) == "ph")
+                & (inst["sector"].astype(str).isin(["ph-rho", "charge"]))
+            )
+            inst.loc[raw_gamma_charge, "ordering_strength"] = -np.inf
+
         top = inst.sort_values("ordering_strength", ascending=False).iloc[0]
         row.update({
             "top_q": top.get("q_label", ""),
@@ -242,12 +354,32 @@ def collect_one_snapshot(
             "top_mode": int(top.get("mode", 0)),
             "top_strength": float(top.get("ordering_strength", np.nan)),
             "top_strength_raw": float(top.get("strength_svd_KL", np.nan)),
-            "top_strength_note": "Gamma ph-rho uses strength_after_remove_onsite_A1 when available",
+            "top_strength_note": "Gamma ph-rho uses explicit ph-rho-A1proj row when available",
         })
+        add_mode_aligned_fields(row, "top", top, order)
+
+        gamma_A1 = select_best_inst_row(
+            inst,
+            (inst["q_label"].astype(str) == "Gamma")
+            & (inst["family"].astype(str) == "ph")
+            & (inst["sector"].astype(str).isin(["ph-rho-A1proj", "charge-A1proj"])),
+            "ordering_strength",
+        )
+        add_mode_aligned_fields(row, "Gamma_ph_rho_A1proj_top", gamma_A1, order)
+
+        m_rho_top = select_best_inst_row(
+            inst,
+            (inst["q_label"].astype(str).str.startswith("M"))
+            & (inst["family"].astype(str) == "ph")
+            & (inst["sector"].astype(str).isin(["ph-rho", "charge"])),
+            "ordering_strength",
+        )
+        add_mode_aligned_fields(row, "Mbest_ph_rho_top", m_rho_top, order)
 
         row["Gamma_pp_singlet"] = get_strength(inst, "Gamma", "pp", "pp-singlet")
         row["Gamma_ph_rho_raw"] = get_strength(inst, "Gamma", "ph", "ph-rho", corrected=False)
-        row["Gamma_ph_rho"] = get_strength(inst, "Gamma", "ph", "ph-rho", corrected=True)
+        row["Gamma_ph_rho_A1proj"] = get_strength_any_sector(inst, "Gamma", "ph", ["ph-rho-A1proj", "charge-A1proj"], corrected=True)
+        row["Gamma_ph_rho"] = row["Gamma_ph_rho_A1proj"] if np.isfinite(row["Gamma_ph_rho_A1proj"]) else get_strength(inst, "Gamma", "ph", "ph-rho", corrected=True)
         row["Gamma_ph_sx"] = get_strength(inst, "Gamma", "ph", "ph-sx")
         row["Gamma_ph_sy"] = get_strength(inst, "Gamma", "ph", "ph-sy")
         row["Gamma_ph_sz"] = get_strength(inst, "Gamma", "ph", "ph-sz")
@@ -260,10 +392,24 @@ def collect_one_snapshot(
 
     for sec in ["ph-rho", "ph-sx", "ph-sy", "ph-sz"]:
         clean = sec.replace("-", "_")
-        row[f"Gamma_{clean}_LCO_score"] = get_score(order, "Gamma", sec, "LCO_score")
-        row[f"Gamma_{clean}_CBO_SBO_score"] = get_score(order, "Gamma", sec, "CBO_SBO_score")
-        row[f"Mbest_{clean}_LCO_score"] = get_score(order, "Mbest", sec, "LCO_score")
-        row[f"Mbest_{clean}_CBO_SBO_score"] = get_score(order, "Mbest", sec, "CBO_SBO_score")
+
+        if sec == "ph-rho" and "Gamma_ph_rho_A1proj_top_mode_key" in row:
+            row[f"Gamma_{clean}_LCO_score"] = get_score_for_top_mode(order, gamma_A1, "LCO_score")
+            row[f"Gamma_{clean}_CBO_SBO_score"] = get_score_for_top_mode(order, gamma_A1, "CBO_SBO_score")
+            row[f"Gamma_{clean}_order_label"] = row.get("Gamma_ph_rho_A1proj_top_order_label", "")
+            row[f"Gamma_{clean}_score_note"] = "mode-aligned score from Gamma ph-rho-A1proj top mode"
+        else:
+            row[f"Gamma_{clean}_LCO_score"] = get_score(order, "Gamma", sec, "LCO_score")
+            row[f"Gamma_{clean}_CBO_SBO_score"] = get_score(order, "Gamma", sec, "CBO_SBO_score")
+
+        if sec == "ph-rho" and "Mbest_ph_rho_top_mode_key" in row:
+            row[f"Mbest_{clean}_LCO_score"] = get_score_for_top_mode(order, m_rho_top, "LCO_score")
+            row[f"Mbest_{clean}_CBO_SBO_score"] = get_score_for_top_mode(order, m_rho_top, "CBO_SBO_score")
+            row[f"Mbest_{clean}_order_label"] = row.get("Mbest_ph_rho_top_order_label", "")
+            row[f"Mbest_{clean}_score_note"] = "mode-aligned score from strongest M ph-rho top mode"
+        else:
+            row[f"Mbest_{clean}_LCO_score"] = get_score(order, "Mbest", sec, "LCO_score")
+            row[f"Mbest_{clean}_CBO_SBO_score"] = get_score(order, "Mbest", sec, "CBO_SBO_score")
 
     # Basic subspace scores, if present.
     if not sub.empty:

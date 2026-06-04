@@ -31,8 +31,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-import TUfRG_model_v2 as km
-import TUfRG_runner_v2 as base
+import TUfRG_model as km
+import TUfRG_runner as base
 
 
 def parse_int_set(s: str | None) -> set[int]:

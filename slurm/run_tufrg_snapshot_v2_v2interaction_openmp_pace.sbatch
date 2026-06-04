@@ -62,7 +62,7 @@ VERTEX_CONVENTION="${VERTEX_CONVENTION:-official_s1minus1}"
 TU_CHANNEL_CALC_PROJECT="${TU_CHANNEL_CALC_PROJECT:-0}"
 
 args=(
-  python -u TUfRG_runner_snapshots_v2.py
+  python -u TUfRG_runner_snapshots.py
   --U "$U"
   --V1 "$V1"
   --V2 "$V2"

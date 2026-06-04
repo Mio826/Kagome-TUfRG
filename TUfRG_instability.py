@@ -605,11 +605,111 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+
+def append_gamma_A1proj_modes(data: CaseData, rows: List[Dict[str, Any]], modes: Dict[str, np.ndarray], *, n_modes: int) -> List[Dict[str, Any]]:
+    """Append mode-aligned Gamma ph-rho/charge modes after removing onsite uniform A1.
+
+    Old diagnosis only reported strength_after_remove_onsite_A1 for raw Gamma
+    ph-rho rows.  That made strength and structure not mode-aligned.
+
+    This function fixes it by constructing
+
+        Aproj = P_noA1 @ (K_Gamma_rho @ L_Gamma_rho) @ P_noA1
+
+    then re-SVDing Aproj and saving the projected right singular vectors as
+    normal instability modes with sector ph-rho-A1proj or charge-A1proj.
+    """
+    qmap = q_labels_to_indices(data, ["Gamma"])
+    iq = int(qmap["Gamma"])
+
+    if data.SU2 == 1 or data.n_spin == 1:
+        kernels = build_su2_kernels(data, iq)
+        target_sectors = {"charge"}
+    else:
+        kernels = build_explicit_kernels(data, iq)
+        target_sectors = {"ph-rho"}
+
+    P_no_A1 = projector_remove_template(onsite_A1_template(data.O))
+
+    start_row_id = 0
+    if rows:
+        start_row_id = max(int(r.get("row_id", 0)) for r in rows) + 1
+
+    new_rows: List[Dict[str, Any]] = []
+
+    for spec in kernels:
+        family = str(spec["family"])
+        sector = str(spec["sector"])
+        if family != "ph" or sector not in target_sectors:
+            continue
+
+        K = np.asarray(spec["K"], dtype=complex)
+        L = np.asarray(spec["L"], dtype=complex)
+        A = K @ L
+        Aproj = P_no_A1 @ A @ P_no_A1
+
+        svals, right, left = svd_strength_and_vectors(Aproj, n_modes)
+        norms = matrix_norms(K, L)
+
+        for m in range(len(svals)):
+            vec = P_no_A1 @ right[m]
+            nrm = np.linalg.norm(vec)
+            if nrm > 1e-14:
+                vec = vec / nrm
+
+            new_sector = f"{sector}-A1proj"
+            key = mode_key(
+                start_row_id + len(new_rows),
+                "Gamma",
+                family,
+                new_sector,
+                "onsiteA1_projected_KL_resvd",
+                m,
+            )
+            modes[key] = vec
+
+            row = {
+                "row_id": start_row_id + len(new_rows),
+                "mode_key": key,
+                "case": data.case_dir.name,
+                "q_label": "Gamma",
+                "iq": iq,
+                "q_reduced": str(q_reduced(iq, data.nk)),
+                "family": family,
+                "sector": new_sector,
+                "convention": "onsiteA1_projected_KL_resvd",
+                "mode": m,
+                "strength_svd_KL": float(svals[m]),
+                "strength_source": "svd(P_no_onsite_A1 @ K@L @ P_no_onsite_A1)",
+                "kernel_note": (
+                    "Gamma ph-rho/charge re-SVD after removing onsite uniform A1; "
+                    "saved vector is projected and renormalized"
+                ),
+                "vector_kind": "right_singular_vector_of_projected_KL_in_TU_formfactor_basis",
+                **norms,
+            }
+            new_rows.append(row)
+
+    rows.extend(new_rows)
+    return new_rows
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     data = load_case(Path(args.case_dir))
     assert_raw_channel_compatibility(data)
     rows, modes, report, cal_rows = analyze_case(data, args.q, n_modes=args.n_modes, method=args.method)
+
+    # Fix Gamma ph-rho mode-alignment:
+    # add projected Gamma charge/rho modes after removing onsite uniform A1.
+    new_A1_rows = append_gamma_A1proj_modes(data, rows, modes, n_modes=args.n_modes)
+    if new_A1_rows:
+        report += "\n\nGamma onsite-A1-projected re-SVD modes added:\n"
+        for r in new_A1_rows:
+            report += (
+                f"  {r['mode_key']}  sector={r['sector']}  "
+                f"strength={float(r['strength_svd_KL']):.8e}\n"
+            )
+
     outdir = data.case_dir / str(args.out)
     outdir.mkdir(parents=True, exist_ok=True)
     write_csv(outdir / "instability_summary.csv", rows)
