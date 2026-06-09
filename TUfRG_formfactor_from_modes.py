@@ -61,7 +61,7 @@ def component_distances(O: Any) -> np.ndarray:
     lattice, pos = km.kagome_lattice_and_positions()
     d = np.zeros(len(ofrom), dtype=float)
     for i in range(len(ofrom)):
-        dr = km.displacement_vector(lattice, pos, int(R[i, 0]), int(R[i, 1]), int(ofrom[i]), int(oto[i]))
+        dr = km.tu_ff_displacement_vector(lattice, pos, int(R[i, 0]), int(R[i, 1]), int(ofrom[i]), int(oto[i]))
         d[i] = float(np.linalg.norm(dr[:2]))
     return d
 

@@ -41,10 +41,9 @@ def real_displacement(row):
     ofrom = int(row["ofrom"])
     oto = int(row["oto"])
 
-    # The sign convention for tau shift may be reversed depending on how
-    # ofrom/oto is defined, but the distance shell is invariant under reversal
-    # for the purpose of classifying shell length.
-    disp = r0 * A1 + r1 * A2 + r2 * A3 + TAU[ofrom] - TAU[oto]
+    # divERGe TU convention: ofrom is in cell R and oto is in the home cell.
+    # The displacement from ofrom to oto is tau_oto - tau_ofrom - R.
+    disp = TAU[oto] - TAU[ofrom] - (r0 * A1 + r1 * A2 + r2 * A3)
     return disp
 
 

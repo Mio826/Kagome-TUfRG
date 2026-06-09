@@ -53,9 +53,9 @@ def classify_components(R, ofrom, oto, tol=1e-5):
     Classify each TU form-factor component by physical distance shell
     using the official TUfRG_model geometry.
 
-    This must match the model construction:
+    This must match the divERGe TU output convention, not the model-construction hopping convention:
         lattice, pos = km.kagome_lattice_and_positions()
-        dr = km.displacement_vector(lattice, pos, Rx, Ry, ofrom, oto)
+        dr = km.tu_ff_displacement_vector(lattice, pos, Rx, Ry, ofrom, oto)
     """
     lattice, pos = km.kagome_lattice_and_positions()
 
@@ -66,7 +66,7 @@ def classify_components(R, ofrom, oto, tol=1e-5):
     for i in range(nff):
         aa = int(ofrom[i])
         bb = int(oto[i])
-        dr = km.displacement_vector(
+        dr = km.tu_ff_displacement_vector(
             lattice, pos,
             int(R[i, 0]), int(R[i, 1]),
             aa, bb

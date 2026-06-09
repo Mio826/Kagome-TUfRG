@@ -128,7 +128,7 @@ def component_distances(O: Any) -> np.ndarray:
     lattice, pos = km.kagome_lattice_and_positions()
     d = np.zeros(len(ofrom), dtype=float)
     for i in range(len(ofrom)):
-        dr = km.displacement_vector(lattice, pos, int(R[i, 0]), int(R[i, 1]), int(ofrom[i]), int(oto[i]))
+        dr = km.tu_ff_displacement_vector(lattice, pos, int(R[i, 0]), int(R[i, 1]), int(ofrom[i]), int(oto[i]))
         d[i] = float(np.linalg.norm(dr[:2]))
     return d
 
@@ -244,30 +244,45 @@ def structural_decomposition(O: Any, f: np.ndarray, qred: Sequence[float]) -> Di
     return out
 
 
+def is_gamma_label(q_label: str) -> bool:
+    return str(q_label) in {"Gamma", "G", "q0", "0", "iq0"}
+
+
 def structural_label(sector: str, q_label: str, onsite: float, sym_nn: float, antisym_nn: float) -> str:
+    """Conservative structural label.
+
+    The channel, transfer momentum, and spin/charge/pp sector are reliable.
+    The bond-symmetric / bond-antisymmetric classifier is only used at Gamma.
+    At finite q, the correct Hermitian current/bond source embedding requires
+    additional reciprocal-gauge phases, so we avoid CBO/SBO/LCO labels here.
+    """
     sector = str(sector)
     q_label = str(q_label)
     is_charge = sector in {"ph-rho", "charge"} or "rho" in sector
     is_spin = sector in {"ph-sz", "mag"} or sector.startswith("ph-s")
-    is_gamma = q_label in {"Gamma", "G", "q0", "0", "iq0"}
+    is_gamma = is_gamma_label(q_label)
 
     if is_charge:
+        if not is_gamma:
+            return "finiteQ-charge-PH-order-structural-subtype-unresolved"
         if antisym_nn > 0.35 and onsite < 0.25:
-            return "q0-charge-LCO-like" if is_gamma else "finiteQ-charge-LCO-like"
+            return "q0-charge-LCO-like"
         if sym_nn > 0.35:
-            return "q0-CBO/nematic-like" if is_gamma else "finiteQ-CBO-like"
+            return "q0-CBO/nematic-like"
         if onsite > 0.40:
-            return "q0-charge-onsite/forward-like" if is_gamma else "finiteQ-CDW-like"
-        return "charge-mixed"
+            return "q0-charge-onsite/forward-like"
+        return "q0-charge-mixed"
 
     if is_spin:
+        if not is_gamma:
+            return "finiteQ-spin-PH-order-structural-subtype-unresolved"
         if antisym_nn > 0.35 and onsite < 0.25:
-            return "q0-spin-LCO-like" if is_gamma else "finiteQ-spin-LCO-like"
+            return "q0-spin-LCO-like"
         if sym_nn > 0.35:
-            return "q0-SBO-like" if is_gamma else "finiteQ-SBO-like"
+            return "q0-SBO-like"
         if onsite > 0.40:
-            return "FM-like" if is_gamma else "finiteQ-SDW-like"
-        return "spin-mixed"
+            return "FM-like"
+        return "q0-spin-mixed"
 
     if sector.startswith("pp") or sector == "sc":
         return "pairing-sector-not-structurally-classified-here"
@@ -296,6 +311,12 @@ def order_scores_for_mode(O: Any, f: np.ndarray, row: Mapping[str, Any], metadat
         float(decomp["bond_antisymmetric_nn_weight"]),
     )
 
+    is_gamma = is_gamma_label(q_label)
+    finite_q_warning = "" if is_gamma else (
+        "finite-q bond-symmetric/antisymmetric and LCO/CBO/SBO scores are not used for phase labels; "
+        "TU form-factor Hermiticity needs reciprocal-gauge calibration"
+    )
+
     summary = {
         "mode_key": str(row.get("mode_key", "")),
         "case": row.get("case", ""),
@@ -317,10 +338,14 @@ def order_scores_for_mode(O: Any, f: np.ndarray, row: Mapping[str, Any], metadat
         "bond_symmetric_all_weight": decomp["bond_symmetric_all_weight"],
         "bond_antisymmetric_all_weight": decomp["bond_antisymmetric_all_weight"],
         "unmatched_reverse_weight": decomp["unmatched_reverse_weight"],
-        "LCO_score": decomp["bond_antisymmetric_nn_weight"],
-        "CBO_SBO_score": decomp["bond_symmetric_nn_weight"],
+        "LCO_score": decomp["bond_antisymmetric_nn_weight"] if is_gamma else float("nan"),
+        "CBO_SBO_score": decomp["bond_symmetric_nn_weight"] if is_gamma else float("nan"),
+        "finite_q_structural_warning": finite_q_warning,
         "order_label": label,
-        "classification_note": "q-unwound bond-reversal structural classifier; phase-invariant under F -> exp(i theta) F",
+        "classification_note": (
+            "Gamma structural classifier uses corrected divERGe TU displacement convention. "
+            "Finite-q CBO/SBO/LCO sublabels are disabled pending explicit source/gauge calibration."
+        ),
     }
 
     comp_rows: List[Dict[str, Any]] = []
@@ -406,9 +431,11 @@ def subspace_summary(O: Any, group_rows: pd.DataFrame, modes: Mapping[str, np.nd
             accum[k] += float(one.get(k, 0.0))
     for k in accum:
         accum[k] /= len(basis)
+    q_label_first = str(first.get("q_label", ""))
+    is_gamma_subspace = is_gamma_label(q_label_first)
     label = structural_label(
         str(first.get("sector", "")),
-        str(first.get("q_label", "")),
+        q_label_first,
         accum["onsite_weight"],
         accum["bond_symmetric_nn_weight"],
         accum["bond_antisymmetric_nn_weight"],
@@ -424,10 +451,11 @@ def subspace_summary(O: Any, group_rows: pd.DataFrame, modes: Mapping[str, np.nd
         "min_strength_svd_KL": float(np.min(strengths)) if strengths else 0.0,
         "included_mode_keys": ";".join(keys),
         **{f"subspace_{k}": v for k, v in accum.items()},
-        "subspace_LCO_score": accum["bond_antisymmetric_nn_weight"],
-        "subspace_CBO_SBO_score": accum["bond_symmetric_nn_weight"],
+        "subspace_LCO_score": accum["bond_antisymmetric_nn_weight"] if is_gamma_subspace else float("nan"),
+        "subspace_CBO_SBO_score": accum["bond_symmetric_nn_weight"] if is_gamma_subspace else float("nan"),
+        "subspace_finite_q_structural_warning": "" if is_gamma_subspace else "finite-q subspace CBO/SBO/LCO scores disabled pending TU source/gauge calibration",
         "subspace_order_label": label,
-        "subspace_note": "trace-average over orthonormalized near-degenerate modes; invariant under unitary rotations inside the selected subspace",
+        "subspace_note": "trace-average over orthonormalized near-degenerate modes; finite-q CBO/SBO/LCO sublabels disabled",
     }
 
 

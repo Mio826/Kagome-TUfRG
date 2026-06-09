@@ -102,7 +102,7 @@ def component_geometry(O: Any, tol: float = 1e-5) -> pd.DataFrame:
     Rnorm = np.zeros(n, dtype=float)
 
     for i in range(n):
-        dr = km.displacement_vector(
+        dr = km.tu_ff_displacement_vector(
             lattice, pos,
             int(R[i, 0]), int(R[i, 1]),
             int(ofrom[i]), int(oto[i]),

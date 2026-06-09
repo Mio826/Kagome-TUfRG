@@ -3,6 +3,9 @@ ssh mli826@login-phoenix.pace.gatech.edu
 module load anaconda3/2023.03
 conda activate /storage/scratch1/4/mli826/conda_envs/diverge-test
 
+cd scratch
+cd divERGe_test_run
+cd runs
 
 sbatch --export=ALL,U=1.0,V=0.5,LAMBDA_NN=0.05,LAMBDA_NNN=0.0,TAG=U1_V0p5_lnn005 run_tufrg_real_v2.sbatch
 

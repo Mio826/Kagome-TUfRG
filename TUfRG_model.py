@@ -136,8 +136,34 @@ def kagome_lattice_and_positions() -> Tuple[np.ndarray, np.ndarray]:
 
 
 def displacement_vector(lattice: np.ndarray, pos: np.ndarray, Rx: int, Ry: int, o_from: int, o_to: int) -> np.ndarray:
-    """Vector from orbital `o_from` in home cell to `o_to` in cell (Rx,Ry)."""
+    """Vector from orbital `o_from` in home cell to `o_to` in cell (Rx,Ry).
+
+    This is a generic model-construction geometry helper.  Do not use it for
+    interpreting divERGe TU form-factor components read from O.dvg; for those
+    use :func:`tu_ff_displacement_vector` below.
+    """
     return pos[o_to] - pos[o_from] + Rx * lattice[0] + Ry * lattice[1]
+
+
+def tu_ff_displacement_vector(lattice: np.ndarray, pos: np.ndarray, Rx: int, Ry: int, o_from: int, o_to: int) -> np.ndarray:
+    """Physical displacement of a divERGe TU form-factor component.
+
+    divERGe stores each TU component as (R, ofrom, oto), but the C source
+    constructs the real-space bond with ``ofrom`` in cell R and ``oto`` in the
+    home cell.  The displacement from the annihilation/from end to the
+    creation/to end is therefore
+
+        tau_oto - (tau_ofrom + R) = tau_oto - tau_ofrom - R.
+
+    This convention was verified from ``src/tu/diverge_interface.c`` where
+    ``from = position[ofrom] + R`` and ``to = position[oto]`` are used to build
+    ``real_ff``, and from reduced-loop maps where form-factor orbital pairs
+    enter as (oto, ofrom).
+
+    Use this helper only for post-processing arrays ``mi_to_R``,
+    ``mi_to_ofrom``, and ``mi_to_oto`` loaded from divERGe output.
+    """
+    return pos[o_to] - pos[o_from] - Rx * lattice[0] - Ry * lattice[1]
 
 
 def canonical_direction_sign(o_from: int, o_to: int) -> float:
@@ -754,7 +780,7 @@ def model_summary(model) -> Dict[str, object]:
 __all__ = [
     "A", "B", "C", "SPIN_UP", "SPIN_DN", "N_ORB", "N_SPIN",
     "KMParameters", "MeshParameters", "HopEntry", "VertexEntry",
-    "kagome_lattice_and_positions", "displacement_vector",
+    "kagome_lattice_and_positions", "displacement_vector", "tu_ff_displacement_vector",
     "enumerate_offdiag_bonds_at_distance", "high_symmetry_q_indices", "qmesh_reduced",
     "spinful_hoppings", "density_vertices", "density_vertices_official_s1minus1", "density_vertices_manual", "kagome_spinful_hopping_entries", "spinful_vertex_entries_density_density",
     "summarize_hoppings", "summarize_vertices",

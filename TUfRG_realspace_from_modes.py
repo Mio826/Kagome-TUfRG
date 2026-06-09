@@ -154,7 +154,7 @@ def component_distances(O: Any) -> np.ndarray:
     lattice, pos = km.kagome_lattice_and_positions()
     d = np.zeros(len(ofrom), dtype=float)
     for i in range(len(ofrom)):
-        dr = km.displacement_vector(lattice, pos, int(R[i, 0]), int(R[i, 1]), int(ofrom[i]), int(oto[i]))
+        dr = km.tu_ff_displacement_vector(lattice, pos, int(R[i, 0]), int(R[i, 1]), int(ofrom[i]), int(oto[i]))
         d[i] = float(np.linalg.norm(dr[:2]))
     return d
 
@@ -210,31 +210,44 @@ def q_unwind_formfactor(O: Any, f: np.ndarray, qred: Sequence[float]) -> Tuple[n
     return np.asarray(f, dtype=complex).reshape(-1) * phase, phase
 
 
+def is_gamma_label(q_label: str) -> bool:
+    return str(q_label) in {"Gamma", "G", "q0", "0", "iq0"}
+
+
 def structural_label_from_scores(sector: str, q_label: str, onsite: float, sym_nn: float, antisym_nn: float) -> str:
-    """Conservative structural label from structural weights."""
+    """Conservative structural label from structural weights.
+
+    Use bond-symmetric / bond-antisymmetric labels only at Gamma.  Finite-q
+    LCO/CBO/SBO labels require an explicitly calibrated TU source convention
+    and are intentionally disabled here.
+    """
     sector = str(sector)
     q_label = str(q_label)
     is_charge = sector in {"ph-rho", "charge"} or "rho" in sector
     is_spin = sector in {"ph-sz", "mag"} or sector.startswith("ph-s")
-    is_gamma = q_label in {"Gamma", "G", "q0", "0", "iq0"}
+    is_gamma = is_gamma_label(q_label)
 
     if is_charge:
+        if not is_gamma:
+            return "finiteQ-charge-PH-order-structural-subtype-unresolved"
         if antisym_nn > 0.35 and onsite < 0.25:
-            return "q0-charge-LCO-like" if is_gamma else "finiteQ-charge-LCO-like"
+            return "q0-charge-LCO-like"
         if sym_nn > 0.35:
-            return "q0-CBO/nematic-like" if is_gamma else "finiteQ-CBO-like"
+            return "q0-CBO/nematic-like"
         if onsite > 0.40:
-            return "q0-charge-onsite/forward-like" if is_gamma else "finiteQ-CDW-like"
-        return "charge-mixed"
+            return "q0-charge-onsite/forward-like"
+        return "q0-charge-mixed"
 
     if is_spin:
+        if not is_gamma:
+            return "finiteQ-spin-PH-order-structural-subtype-unresolved"
         if antisym_nn > 0.35 and onsite < 0.25:
-            return "q0-spin-LCO-like" if is_gamma else "finiteQ-spin-LCO-like"
+            return "q0-spin-LCO-like"
         if sym_nn > 0.35:
-            return "q0-SBO-like" if is_gamma else "finiteQ-SBO-like"
+            return "q0-SBO-like"
         if onsite > 0.40:
-            return "FM-like" if is_gamma else "finiteQ-SDW-like"
-        return "spin-mixed"
+            return "FM-like"
+        return "q0-spin-mixed"
 
     return "not-PH-charge/spin-classified"
 
@@ -293,6 +306,7 @@ def structural_bond_pair_diagnostics(
     mode_key = str(row.get("mode_key", ""))
     sector = str(row.get("sector", ""))
     q_label = str(row.get("q_label", ""))
+    is_gamma = is_gamma_label(q_label)
     summary = {
         "mode_key": mode_key,
         "family": row.get("family", ""),
@@ -308,10 +322,11 @@ def structural_bond_pair_diagnostics(
         "structural_symmetric_all_weight": sym_all_w,
         "structural_antisymmetric_all_weight": antisym_all_w,
         "structural_unmatched_reverse_weight": unmatched_w,
-        "structural_lco_score": antisym_nn_w,
-        "structural_cbo_sbo_score": sym_nn_w,
+        "structural_lco_score": antisym_nn_w if is_gamma else float("nan"),
+        "structural_cbo_sbo_score": sym_nn_w if is_gamma else float("nan"),
+        "structural_finite_q_warning": "" if is_gamma else "finite-q current/CBO/SBO subtype disabled pending TU source/gauge calibration",
         "structural_label": structural_label_from_scores(sector, q_label, onsite_w, sym_nn_w, antisym_nn_w),
-        "structural_note": "q-unwound linear bond-reversal symmetric/antisymmetric weights; not raw Re/Im",
+        "structural_note": "Gamma structural weights use corrected divERGe TU displacement convention; finite-q CBO/SBO/LCO sublabels disabled",
     }
 
     comp_rows: List[Dict[str, Any]] = []
@@ -366,8 +381,23 @@ def realspace_coordinates(cell: Tuple[int, int], orbital: int) -> np.ndarray:
 
 
 def endpoint_coordinates(cell: Tuple[int, int], R: Sequence[int], ofrom: int, oto: int) -> Tuple[np.ndarray, np.ndarray]:
-    x0 = realspace_coordinates(cell, ofrom)
-    to_cell = (cell[0] + int(R[0]), cell[1] + int(R[1]))
+    """Return plotting endpoints for a divERGe TU form-factor component.
+
+    divERGe stores a TU component as (R, ofrom, oto), with ``ofrom`` located
+    in cell R and ``oto`` located in the home cell.  Therefore the physical
+    displacement represented by the component is
+
+        tau_oto - tau_ofrom - R.
+
+    This is different from the model-construction hopping convention, where a
+    hopping entry usually means from ``ofrom`` in the home cell to ``oto`` in
+    cell R.  This helper is used only for visualizing/reconstructing TU output
+    components read from O.dvg.
+    """
+    from_cell = (cell[0] + int(R[0]), cell[1] + int(R[1]))
+    to_cell = cell
+
+    x0 = realspace_coordinates(from_cell, ofrom)
     x1 = realspace_coordinates(to_cell, oto)
     return x0, x1
 
