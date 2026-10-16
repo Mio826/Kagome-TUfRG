@@ -2,7 +2,7 @@
 # coding: utf-8
 """
 TUfRG_runner.py
-Version: v2plusV2-2026-05-21
+Version: unified-V3-Rashba-2026-10
 
 Official small-run / benchmark runner for the spinful kagome Kane-Mele extended
 Hubbard model built by TUfRG_model.py.
@@ -27,10 +27,10 @@ Important convention notes
 * The bosonic q mesh has nk*nk points.  M-point q indices come from nk, not nk*nkf.
 * divERGe built-in S_* postprocess outputs are q=0 only.  M-point analysis must
   use q-resolved P/C/D output later in the inspector.
-* For spinful non-SU2 runs used by our explicit-spin diagnosis, always save
-  RAW unprojected P/C/D channels: --tu-channel-calc-project 0.  Projected
-  saved channels are incompatible with the explicit-spin Pauli projection in
-  TUfRG_instability_rawguard.py.
+* Default --tu-channel-calc-project 0 preserves the historical setup.
+  This flag controls postprocessing channel diagonalization; tests have shown
+  that nonzero values do not necessarily change raw saved P/C/D. A future
+  instability analysis must independently validate its input conventions.
 * Density interactions are built by the official divERGe D-channel s1=-1
   convention by default.  The legacy manual spin enumeration can be selected
   only for bridge tests.
@@ -97,21 +97,22 @@ def effective_single_V1(args: argparse.Namespace) -> float:
     return 0.0
 
 
-def parse_case(case: str, *, default_V2: float = 0.0) -> Tuple[str, float, float, float]:
-    """Parse NAME:U:V1 or NAME:U:V1:V2."""
+def parse_case(case: str, *, default_V2: float = 0.0, default_V3: float = 0.0) -> Tuple[str, float, float, float, float]:
+    """Parse NAME:U:V1[:V2[:V3]], preserving shorter legacy formats."""
     parts = case.split(":")
-    if len(parts) not in (3, 4):
-        raise ValueError(f"Bad --case {case!r}; expected NAME:U:V1 or NAME:U:V1:V2")
+    if len(parts) not in (3, 4, 5):
+        raise ValueError(f"Bad --case {case!r}; expected NAME:U:V1[:V2[:V3]]")
     name = parts[0]
     if not name:
         raise ValueError("case name must be non-empty")
     U = float(parts[1])
     V1 = float(parts[2])
-    V2 = float(parts[3]) if len(parts) == 4 else float(default_V2)
-    return name, U, V1, V2
+    V2 = float(parts[3]) if len(parts) >= 4 else float(default_V2)
+    V3 = float(parts[4]) if len(parts) >= 5 else float(default_V3)
+    return name, U, V1, V2, V3
 
 
-def make_params(args: argparse.Namespace, *, U: float, V1: float, V2: float) -> km.KMParameters:
+def make_params(args: argparse.Namespace, *, U: float, V1: float, V2: float, V3: float) -> km.KMParameters:
     return km.KMParameters(
         t=float(args.t),
         mu=float(args.mu),
@@ -119,9 +120,11 @@ def make_params(args: argparse.Namespace, *, U: float, V1: float, V2: float) -> 
         filling_mode=str(args.filling_mode),
         lambda_nn=float(args.lambda_nn),
         lambda_nnn=float(args.lambda_nnn),
+        lambda_rashba=float(args.lambda_rashba),
         U=float(U),
         V1=float(V1),
         V2=float(V2),
+        V3=float(V3),
         filling_ngrid=int(args.filling_ngrid),
     )
 
@@ -346,10 +349,10 @@ def run_one_case(case_name: str, params: km.KMParameters, mesh: km.MeshParameter
                 print("WARNING: model_free failed:", repr(exc))
 
 
-def build_case_list(args: argparse.Namespace) -> List[Tuple[str, float, float, float]]:
+def build_case_list(args: argparse.Namespace) -> List[Tuple[str, float, float, float, float]]:
     if args.case:
-        return [parse_case(x, default_V2=float(args.V2)) for x in args.case]
-    return [(str(args.tag), float(args.U), effective_single_V1(args), float(args.V2))]
+        return [parse_case(x, default_V2=float(args.V2), default_V3=float(args.V3)) for x in args.case]
+    return [(str(args.tag), float(args.U), effective_single_V1(args), float(args.V2), float(args.V3))]
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -359,7 +362,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--U", type=float, default=0.2, help="onsite Hubbard U for single-case mode")
     p.add_argument("--V", type=float, default=None, help="alias for --V1, kept for backward-compatible old commands")
     p.add_argument("--V1", type=float, default=None, help="NN density interaction V1 for single-case mode")
-    p.add_argument("--V2", type=float, default=0.0, help="second-neighbor density interaction V2 for single-case mode")
+    p.add_argument("--V2", type=float, default=0.0, help="second-neighbor density interaction V2")
+    p.add_argument("--V3", type=float, default=0.0, help="same-sublattice cross-hexagon density interaction V3")
     p.add_argument("--t", type=float, default=1.0, help="positive t; real NN hopping is -t")
     p.add_argument("--mu", type=float, default=0.0, help="chemical potential for fixed_mu mode")
     p.add_argument("--target-filling", type=float, default=5.0 / 12.0, help="target filling fraction for fixed_filling mode")
@@ -367,6 +371,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--filling-ngrid", type=int, default=120, help="k grid for resolving/estimating filling")
     p.add_argument("--lambda-nn", type=float, default=0.0, help="NN Kane-Mele SOC strength")
     p.add_argument("--lambda-nnn", type=float, default=0.0, help="NNN Kane-Mele SOC strength")
+    p.add_argument("--lambda-rashba", type=float, default=0.0, help="NN Rashba SOC strength, TR-invariant spin mixing")
 
     # Mesh / TU basis.
     p.add_argument("--nk", type=int, default=4, help="coarse nk x nk q/channel momentum mesh; use even nk")
@@ -399,7 +404,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--outdir", default="km_spinful_runs")
     p.add_argument("--tag", default="run", help="case name for single-case mode")
     p.add_argument("--case", action="append", default=None,
-                   help="batch case NAME:U:V1 or NAME:U:V1:V2; can be repeated. Uses common t/mu/SOC/mesh/flow settings.")
+                   help="batch case NAME:U:V1[:V2[:V3]]; can be repeated. Uses common t/mu/SOC/mesh/flow settings.")
 
     # Runtime.
     p.add_argument("--skip-sanity", action="store_true", help="skip pure-numpy model sanity check before building")
@@ -432,8 +437,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("WARNING: mpi_loglevel_set failed:", repr(exc))
 
         all_metadata: List[Dict[str, Any]] = []
-        for name, U, V1, V2 in cases:
-            params = make_params(args, U=U, V1=V1, V2=V2)
+        for name, U, V1, V2, V3 in cases:
+            params = make_params(args, U=U, V1=V1, V2=V2, V3=V3)
             params.validate()
             md = run_one_case(name, params, mesh, args)
             all_metadata.append(md)

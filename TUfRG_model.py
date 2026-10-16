@@ -4,14 +4,14 @@
 TUfRG_model.py
 
 Official model-construction helpers for spinful kagome extended Hubbard models
-with NN/NNN Kane-Mele spin-orbit coupling and U/V1/V2 density interactions, intended for divERGe TUFRG runs.
+with NN/NNN Kane-Mele and NN Rashba spin-orbit coupling and U/V1/V2/V3 density interactions, intended for divERGe TUFRG runs.
 
 Scope
 -----
 This module builds and validates the MODEL only:
     * kagome lattice geometry and orbital positions;
-    * spinful real-space hopping list for NN hopping + NN/NNN Kane-Mele SOC;
-    * official divERGe D-channel density-density interaction vertices for onsite U, NN V1, and second-neighbor V2;
+    * spinful real-space hopping list for NN hopping + NN/NNN Kane-Mele SOC + NN Rashba SOC;
+    * official divERGe D-channel density-density interaction vertices for onsite U, NN V1, second-neighbor V2, and same-sublattice cross-hexagon V3;
     * fixed-chemical-potential OR fixed-filling chemical-potential resolution;
     * pure-numpy one-body sanity checks;
     * divERGe model initialization and TU form-factor basis generation.
@@ -77,9 +77,11 @@ class KMParameters:
     filling_mode: str = "fixed_mu"  # "fixed_mu" or "fixed_filling"
     lambda_nn: float = 0.0
     lambda_nnn: float = 0.0
+    lambda_rashba: float = 0.0
     U: float = 0.0
     V1: float = 0.0
     V2: float = 0.0
+    V3: float = 0.0
     filling_ngrid: int = 120
 
     def validate(self) -> None:
@@ -193,7 +195,7 @@ def enumerate_offdiag_bonds_at_distance(distance: float, *, search_range: int = 
 
 
 def high_symmetry_q_indices(nk: int) -> Dict[str, int]:
-    """Return Gamma/M q indices for an nk x nk row-major q mesh.
+    """Return Gamma/M indices for divERGe q order q_index=ix*nk+iy.
 
     M points require even nk. Indices are based on the coarse bosonic q mesh,
     not the fine nk*nkf loop mesh.
@@ -205,19 +207,19 @@ def high_symmetry_q_indices(nk: int) -> Dict[str, int]:
         raise ValueError("M-point q indices require even nk")
     return {
         "Gamma": 0,
-        "M1": nk // 2,
-        "M2": (nk // 2) * nk,
+        "M1": (nk // 2) * nk,
+        "M2": nk // 2,
         "M3": (nk // 2) * nk + nk // 2,
     }
 
 
 def qmesh_reduced(nk: int) -> np.ndarray:
-    """Return reduced coordinates of a row-major nk x nk q mesh."""
+    """Return reduced q coordinates in divERGe order ix*nk + iy."""
     nk = int(nk)
     out = np.zeros((nk * nk, 3), dtype=float)
-    for iy in range(nk):
-        for ix in range(nk):
-            out[ix + nk * iy] = [ix / nk, iy / nk, 0.0]
+    for ix in range(nk):
+        for iy in range(nk):
+            out[ix * nk + iy] = [ix / nk, iy / nk, 0.0]
     return out
 
 
@@ -231,6 +233,7 @@ def spinful_hoppings(
     mu: float = 0.0,
     lambda_nn: float = 0.0,
     lambda_nnn: float = 0.0,
+    lambda_rashba: float = 0.0,
     include_mu: bool = True,
     pair_eta: Optional[Mapping[str, float]] = None,
     search_range: int = 3,
@@ -273,10 +276,31 @@ def spinful_hoppings(
 
     add_km_terms(0.5, lambda_nn)
     add_km_terms(np.sqrt(3.0) / 2.0, lambda_nnn)
+
+    # Nearest-neighbor Rashba: H_ij^R = i*lambda_rashba *
+    # [sigma_x*dhat_y - sigma_y*dhat_x], with dhat pointing FROM
+    # (home cell, o_from) TO (R, o_to), and |dhat|=1.
+    # Only spin-flip entries occur. The reversed bond automatically has the
+    # Hermitian conjugate amplitude; time reversal is preserved while Sz
+    # conservation is broken. This sign convention is explicitly chosen here;
+    # the old TUfRG_model_rashba.py was NOT among the supplied source files.
+    if abs(float(lambda_rashba)) > 0:
+        for R, o_from, o_to, dr in enumerate_offdiag_bonds_at_distance(0.5, search_range=search_range):
+            d = np.asarray(dr[:2], dtype=float)
+            d /= np.linalg.norm(d)
+            dx, dy = float(d[0]), float(d[1])
+            # sigma_x*dy - sigma_y*dx: (up,down)=dy+i*dx,
+            #                              (down,up)=dy-i*dx.
+            amp_ud = 1j * float(lambda_rashba) * (dy + 1j*dx)
+            amp_du = 1j * float(lambda_rashba) * (dy - 1j*dx)
+            out.append((R, o_from, o_to, SPIN_UP, SPIN_DN,
+                        (float(amp_ud.real), float(amp_ud.imag))))
+            out.append((R, o_from, o_to, SPIN_DN, SPIN_UP,
+                        (float(amp_du.real), float(amp_du.imag))))
     return out
 
 
-def density_vertices_manual(*, U: float = 0.0, V1: float = 0.0, V2: float = 0.0, search_range: int = 2) -> List[VertexEntry]:
+def density_vertices_manual(*, U: float = 0.0, V1: float = 0.0, V2: float = 0.0, V3: float = 0.0, search_range: int = 2) -> List[VertexEntry]:
     r"""Legacy explicit-spin density-density interaction entries.
 
     This is the old/manual convention:
@@ -311,10 +335,19 @@ def density_vertices_manual(*, U: float = 0.0, V1: float = 0.0, V2: float = 0.0,
                             for s_right in (SPIN_UP, SPIN_DN):
                                 out.append(("D", [Rx, Ry, 0], o_left, o_right,
                                             s_left, s_right, s_left, s_right, (float(V2), 0.0)))
+                    elif o_left == o_right and abs(dist - 1.0) < 1e-7 and abs(float(V3)) > 0:
+                        # V3: same-sublattice cross-hexagon / third-neighbor density interaction.
+                        # In this geometry NN distance is 0.5, so the cross-hexagon same-sublattice
+                        # separation is 1.0.  The o_left == o_right filter is essential: distance 1.0
+                        # alone would also include unwanted inter-sublattice bonds in other geometries.
+                        for s_left in (SPIN_UP, SPIN_DN):
+                            for s_right in (SPIN_UP, SPIN_DN):
+                                out.append(("D", [Rx, Ry, 0], o_left, o_right,
+                                            s_left, s_right, s_left, s_right, (float(V3), 0.0)))
     return out
 
 
-def density_vertices_official_s1minus1(*, U: float = 0.0, V1: float = 0.0, V2: float = 0.0, search_range: int = 2) -> List[VertexEntry]:
+def density_vertices_official_s1minus1(*, U: float = 0.0, V1: float = 0.0, V2: float = 0.0, V3: float = 0.0, search_range: int = 2) -> List[VertexEntry]:
     r"""Official-style divERGe density-density interaction entries.
 
     Original-code convention:
@@ -352,6 +385,10 @@ def density_vertices_official_s1minus1(*, U: float = 0.0, V1: float = 0.0, V2: f
                     elif abs(dist - np.sqrt(3.0) / 2.0) < 1e-7 and abs(float(V2)) > 0:
                         out.append(("D", [Rx, Ry, 0], o_left, o_right,
                                     -1, 0, 0, 0, (float(V2), 0.0)))
+                    elif o_left == o_right and abs(dist - 1.0) < 1e-7 and abs(float(V3)) > 0:
+                        # V3: same-sublattice cross-hexagon / third-neighbor density interaction.
+                        out.append(("D", [Rx, Ry, 0], o_left, o_right,
+                                    -1, 0, 0, 0, (float(V3), 0.0)))
     return out
 
 
@@ -363,7 +400,7 @@ spinful_vertex_entries_density_density = density_vertices
 
 
 def summarize_hoppings(hops: Sequence[HopEntry]) -> Dict[str, int]:
-    """Count real/SOC/onsite hopping entries."""
+    """Count entries by real/complex amplitude (not a unique physical term type)."""
     counts: Counter[str] = Counter()
     for R, o1, o2, _s1, _s2, amp in hops:
         if abs(float(amp[1])) > 0:
@@ -376,7 +413,7 @@ def summarize_hoppings(hops: Sequence[HopEntry]) -> Dict[str, int]:
 
 
 def summarize_vertices(vertices: Sequence[VertexEntry]) -> Dict[str, int]:
-    """Count onsite-U, NN-V1, and second-neighbor-V2 vertex entries."""
+    """Count onsite-U, NN-V1, second-neighbor-V2, and same-sublattice cross-hexagon-V3 vertex entries."""
     lattice, pos = kagome_lattice_and_positions()
     counts: Counter[str] = Counter()
     for _chan, R, o1, o2, *_rest in vertices:
@@ -389,6 +426,8 @@ def summarize_vertices(vertices: Sequence[VertexEntry]) -> Dict[str, int]:
             counts["NN_V1_like"] += 1
         elif abs(dist - np.sqrt(3.0) / 2.0) < 1e-7:
             counts["NNN_V2_like"] += 1
+        elif o1 == o2 and abs(dist - 1.0) < 1e-7:
+            counts["cross_hexagon_V3_like"] += 1
         else:
             counts["other_vertex"] += 1
     return dict(counts)
@@ -462,6 +501,7 @@ def solve_mu_for_filling(
     t: float = 1.0,
     lambda_nn: float = 0.0,
     lambda_nnn: float = 0.0,
+    lambda_rashba: float = 0.0,
     ngrid: int = 120,
     bracket: Optional[Tuple[float, float]] = None,
     maxiter: int = 80,
@@ -487,7 +527,7 @@ def solve_mu_for_filling(
     if int(ngrid) <= 0:
         raise ValueError("ngrid must be positive")
 
-    base_hops = spinful_hoppings(t=t, mu=0.0, lambda_nn=lambda_nn, lambda_nnn=lambda_nnn, include_mu=False)
+    base_hops = spinful_hoppings(t=t, mu=0.0, lambda_nn=lambda_nn, lambda_nnn=lambda_nnn, lambda_rashba=lambda_rashba, include_mu=False)
     energies: List[float] = []
     for ix in range(int(ngrid)):
         for iy in range(int(ngrid)):
@@ -535,6 +575,7 @@ def resolve_parameters(params: KMParameters) -> Tuple[KMParameters, Dict[str, ob
             mu=0.0,
             lambda_nn=params.lambda_nn,
             lambda_nnn=params.lambda_nnn,
+            lambda_rashba=params.lambda_rashba,
             include_mu=False,
         )
         filling = estimate_filling(hops_no_mu, fermi_level=params.mu, ngrid=params.filling_ngrid)
@@ -552,6 +593,7 @@ def resolve_parameters(params: KMParameters) -> Tuple[KMParameters, Dict[str, ob
         t=params.t,
         lambda_nn=params.lambda_nn,
         lambda_nnn=params.lambda_nnn,
+        lambda_rashba=params.lambda_rashba,
         ngrid=params.filling_ngrid,
     )
     return replace(params, mu=mu), {"filling_mode": "fixed_filling", **rep}
@@ -563,6 +605,7 @@ def noninteracting_sanity_report(
     mu: float = 0.0,
     lambda_nn: float = 0.0,
     lambda_nnn: float = 0.0,
+    lambda_rashba: float = 0.0,
     ngrid: int = 80,
     n_random: int = 32,
     seed: int = 0,
@@ -572,7 +615,7 @@ def noninteracting_sanity_report(
     The hopping list includes the onsite term -mu. Occupancy is measured at
     Fermi level zero. For fixed-filling mode, use `resolve_parameters` first.
     """
-    hops = spinful_hoppings(t=t, mu=mu, lambda_nn=lambda_nn, lambda_nnn=lambda_nnn, include_mu=True)
+    hops = spinful_hoppings(t=t, mu=mu, lambda_nn=lambda_nn, lambda_nnn=lambda_nnn, lambda_rashba=lambda_rashba, include_mu=True)
     rng = np.random.default_rng(seed)
     UT = time_reversal_unitary()
     Sz = Sz_matrix()
@@ -606,13 +649,14 @@ def noninteracting_sanity_report(
     }
 
     return {
-        "parameters": {"t": float(t), "mu": float(mu), "lambda_nn": float(lambda_nn), "lambda_nnn": float(lambda_nnn)},
+        "parameters": {"t": float(t), "mu": float(mu), "lambda_nn": float(lambda_nn), "lambda_nnn": float(lambda_nnn), "lambda_rashba": float(lambda_rashba)},
         "hop_summary": summarize_hoppings(hops),
         "max_hermiticity_error": max_herm,
         "max_time_reversal_error": max_tr,
         "max_Sz_commutator_error": max_sz,
         "max_spin_offdiag_block_norm": max_spin_offdiag,
         "max_Hdn_minus_Hup_star_minus_k": max_ud_relation,
+        "expected_Sz_conserved": abs(float(lambda_rashba)) == 0.0,
         "high_symmetry_energies_shifted": {name: band_energies(k, hops).tolist() for name, k in hs.items()},
         "estimated_filling_at_fermi_zero": estimate_filling(hops, fermi_level=0.0, ngrid=ngrid),
         "target_filling_5_over_12": 5.0 / 12.0,
@@ -621,14 +665,17 @@ def noninteracting_sanity_report(
 
 def assert_sanity_passes(report: Mapping[str, object], *, tol: float = 1e-8) -> None:
     """Raise if core one-body symmetries fail in a sanity report."""
-    keys = [
-        "max_hermiticity_error",
-        "max_time_reversal_error",
-        "max_Sz_commutator_error",
-        "max_spin_offdiag_block_norm",
-        "max_Hdn_minus_Hup_star_minus_k",
-    ]
+    keys = ["max_hermiticity_error", "max_time_reversal_error"]
+    # The following are symmetry tests only when lambda_rashba == 0.
+    # Rashba deliberately mixes up/down and breaks the Sz U(1).
+    if bool(report.get("expected_Sz_conserved", True)):
+        keys.extend(["max_Sz_commutator_error",
+                     "max_spin_offdiag_block_norm",
+                     "max_Hdn_minus_Hup_star_minus_k"])
     bad = {k: float(report[k]) for k in keys if float(report[k]) > tol}
+    if not bool(report.get("expected_Sz_conserved", True)) and \
+            float(report.get("max_spin_offdiag_block_norm", 0.0)) <= tol:
+        bad["Rashba_spin_flip_missing"] = float(report.get("max_spin_offdiag_block_norm", 0.0))
     if bad:
         raise RuntimeError(f"one-body sanity checks failed: {bad}")
 
@@ -676,6 +723,7 @@ def build_model(
             mu=resolved_params.mu,
             lambda_nn=resolved_params.lambda_nn,
             lambda_nnn=resolved_params.lambda_nnn,
+            lambda_rashba=resolved_params.lambda_rashba,
             ngrid=max(20, min(80, int(resolved_params.filling_ngrid))),
             n_random=16,
         )
@@ -704,6 +752,7 @@ def build_model(
         mu=resolved_params.mu,
         lambda_nn=resolved_params.lambda_nn,
         lambda_nnn=resolved_params.lambda_nnn,
+        lambda_rashba=resolved_params.lambda_rashba,
         include_mu=True,
     )
     hoppings = diverge.alloc_array((len(hops),), dtype="rs_hopping_t")
@@ -712,9 +761,9 @@ def build_model(
     model.contents.n_hop = hoppings.size
 
     if vertex_convention in {"official", "official_s1minus1", "s1minus1"}:
-        vertices_list = density_vertices_official_s1minus1(U=resolved_params.U, V1=resolved_params.V1, V2=resolved_params.V2)
+        vertices_list = density_vertices_official_s1minus1(U=resolved_params.U, V1=resolved_params.V1, V2=resolved_params.V2, V3=resolved_params.V3)
     elif vertex_convention in {"manual", "legacy_manual"}:
-        vertices_list = density_vertices_manual(U=resolved_params.U, V1=resolved_params.V1, V2=resolved_params.V2)
+        vertices_list = density_vertices_manual(U=resolved_params.U, V1=resolved_params.V1, V2=resolved_params.V2, V3=resolved_params.V3)
     else:
         raise ValueError(f"unknown vertex_convention={vertex_convention!r}; use official_s1minus1 or manual")
     vertices = diverge.alloc_array((len(vertices_list),), dtype="rs_vertex_t")

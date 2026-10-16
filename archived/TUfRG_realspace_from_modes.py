@@ -646,8 +646,9 @@ def reconstruct(case_dir: Path, rows: pd.DataFrame, modes: Mapping[str, np.ndarr
                 if "current" in observables and first_family == "ph" and o0 != o1:
                     spin_up = getattr(km, "SPIN_UP", 0) if km is not None else 0
                     spin_dn = getattr(km, "SPIN_DN", 1) if km is not None else 1
-                    tup = hops.get((rtuple, o0, o1, spin_up), 0.0 + 0.0j)
-                    tdn = hops.get((rtuple, o0, o1, spin_dn), 0.0 + 0.0j)
+                    model_R = tuple(-int(x) for x in rtuple)
+                    tup = hops.get((model_R, o0, o1, spin_up), 0.0 + 0.0j)
+                    tdn = hops.get((model_R, o0, o1, spin_dn), 0.0 + 0.0j)
                     cur = current_from_sector(first_sector, tup, tdn, f[a])
                     current_rows.append({
                         **common,
